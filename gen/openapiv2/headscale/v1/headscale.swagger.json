@@ -16,91 +16,6 @@
     "application/json"
   ],
   "paths": {
-    "/api/v1/apikey": {
-      "get": {
-        "operationId": "HeadscaleService_ListApiKeys",
-        "responses": {
-          "200": {
-            "description": "A successful response.",
-            "schema": {
-              "$ref": "#/definitions/v1ListApiKeysResponse"
-            }
-          },
-          "default": {
-            "description": "An unexpected error response.",
-            "schema": {
-              "$ref": "#/definitions/rpcStatus"
-            }
-          }
-        },
-        "tags": [
-          "HeadscaleService"
-        ]
-      },
-      "post": {
-        "summary": "--- ApiKeys start ---",
-        "operationId": "HeadscaleService_CreateApiKey",
-        "responses": {
-          "200": {
-            "description": "A successful response.",
-            "schema": {
-              "$ref": "#/definitions/v1CreateApiKeyResponse"
-            }
-          },
-          "default": {
-            "description": "An unexpected error response.",
-            "schema": {
-              "$ref": "#/definitions/rpcStatus"
-            }
-          }
-        },
-        "parameters": [
-          {
-            "name": "body",
-            "in": "body",
-            "required": true,
-            "schema": {
-              "$ref": "#/definitions/v1CreateApiKeyRequest"
-            }
-          }
-        ],
-        "tags": [
-          "HeadscaleService"
-        ]
-      }
-    },
-    "/api/v1/apikey/expire": {
-      "post": {
-        "operationId": "HeadscaleService_ExpireApiKey",
-        "responses": {
-          "200": {
-            "description": "A successful response.",
-            "schema": {
-              "$ref": "#/definitions/v1ExpireApiKeyResponse"
-            }
-          },
-          "default": {
-            "description": "An unexpected error response.",
-            "schema": {
-              "$ref": "#/definitions/rpcStatus"
-            }
-          }
-        },
-        "parameters": [
-          {
-            "name": "body",
-            "in": "body",
-            "required": true,
-            "schema": {
-              "$ref": "#/definitions/v1ExpireApiKeyRequest"
-            }
-          }
-        ],
-        "tags": [
-          "HeadscaleService"
-        ]
-      }
-    },
     "/api/v1/debug/machine": {
       "post": {
         "summary": "--- Machine start ---",
@@ -181,20 +96,6 @@
             }
           }
         },
-        "parameters": [
-          {
-            "name": "namespace",
-            "in": "query",
-            "required": false,
-            "type": "string"
-          },
-          {
-            "name": "key",
-            "in": "query",
-            "required": false,
-            "type": "string"
-          }
-        ],
         "tags": [
           "HeadscaleService"
         ]
@@ -237,37 +138,6 @@
             "description": "A successful response.",
             "schema": {
               "$ref": "#/definitions/v1DeleteMachineResponse"
-            }
-          },
-          "default": {
-            "description": "An unexpected error response.",
-            "schema": {
-              "$ref": "#/definitions/rpcStatus"
-            }
-          }
-        },
-        "parameters": [
-          {
-            "name": "machineId",
-            "in": "path",
-            "required": true,
-            "type": "string",
-            "format": "uint64"
-          }
-        ],
-        "tags": [
-          "HeadscaleService"
-        ]
-      }
-    },
-    "/api/v1/machine/{machineId}/expire": {
-      "post": {
-        "operationId": "HeadscaleService_ExpireMachine",
-        "responses": {
-          "200": {
-            "description": "A successful response.",
-            "schema": {
-              "$ref": "#/definitions/v1ExpireMachineResponse"
             }
           },
           "default": {
@@ -345,16 +215,80 @@
             "required": true,
             "type": "string",
             "format": "uint64"
+          }
+        ],
+        "tags": [
+          "HeadscaleService"
+        ]
+      }
+    },
+    "/api/v1/machine/{machineId}/share/{namespace}": {
+      "post": {
+        "operationId": "HeadscaleService_ShareMachine",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1ShareMachineResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "machineId",
+            "in": "path",
+            "required": true,
+            "type": "string",
+            "format": "uint64"
           },
           {
-            "name": "routes",
-            "in": "query",
-            "required": false,
-            "type": "array",
-            "items": {
-              "type": "string"
-            },
-            "collectionFormat": "multi"
+            "name": "namespace",
+            "in": "path",
+            "required": true,
+            "type": "string"
+          }
+        ],
+        "tags": [
+          "HeadscaleService"
+        ]
+      }
+    },
+    "/api/v1/machine/{machineId}/unshare/{namespace}": {
+      "post": {
+        "operationId": "HeadscaleService_UnshareMachine",
+        "responses": {
+          "200": {
+            "description": "A successful response.",
+            "schema": {
+              "$ref": "#/definitions/v1UnshareMachineResponse"
+            }
+          },
+          "default": {
+            "description": "An unexpected error response.",
+            "schema": {
+              "$ref": "#/definitions/rpcStatus"
+            }
+          }
+        },
+        "parameters": [
+          {
+            "name": "machineId",
+            "in": "path",
+            "required": true,
+            "type": "string",
+            "format": "uint64"
+          },
+          {
+            "name": "namespace",
+            "in": "path",
+            "required": true,
+            "type": "string"
           }
         ],
         "tags": [
@@ -631,47 +565,6 @@
         }
       }
     },
-    "v1ApiKey": {
-      "type": "object",
-      "properties": {
-        "id": {
-          "type": "string",
-          "format": "uint64"
-        },
-        "prefix": {
-          "type": "string"
-        },
-        "expiration": {
-          "type": "string",
-          "format": "date-time"
-        },
-        "createdAt": {
-          "type": "string",
-          "format": "date-time"
-        },
-        "lastSeen": {
-          "type": "string",
-          "format": "date-time"
-        }
-      }
-    },
-    "v1CreateApiKeyRequest": {
-      "type": "object",
-      "properties": {
-        "expiration": {
-          "type": "string",
-          "format": "date-time"
-        }
-      }
-    },
-    "v1CreateApiKeyResponse": {
-      "type": "object",
-      "properties": {
-        "apiKey": {
-          "type": "string"
-        }
-      }
-    },
     "v1CreateNamespaceRequest": {
       "type": "object",
       "properties": {
@@ -756,25 +649,6 @@
         }
       }
     },
-    "v1ExpireApiKeyRequest": {
-      "type": "object",
-      "properties": {
-        "prefix": {
-          "type": "string"
-        }
-      }
-    },
-    "v1ExpireApiKeyResponse": {
-      "type": "object"
-    },
-    "v1ExpireMachineResponse": {
-      "type": "object",
-      "properties": {
-        "machine": {
-          "$ref": "#/definitions/v1Machine"
-        }
-      }
-    },
     "v1ExpirePreAuthKeyRequest": {
       "type": "object",
       "properties": {
@@ -810,17 +684,6 @@
       "properties": {
         "namespace": {
           "$ref": "#/definitions/v1Namespace"
-        }
-      }
-    },
-    "v1ListApiKeysResponse": {
-      "type": "object",
-      "properties": {
-        "apiKeys": {
-          "type": "array",
-          "items": {
-            "$ref": "#/definitions/v1ApiKey"
-          }
         }
       }
     },
@@ -873,17 +736,20 @@
         "discoKey": {
           "type": "string"
         },
-        "ipAddresses": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
+        "ipAddress": {
+          "type": "string"
         },
         "name": {
           "type": "string"
         },
         "namespace": {
           "$ref": "#/definitions/v1Namespace"
+        },
+        "registered": {
+          "type": "boolean"
+        },
+        "registerMethod": {
+          "$ref": "#/definitions/v1RegisterMethod"
         },
         "lastSeen": {
           "type": "string",
@@ -903,9 +769,6 @@
         "createdAt": {
           "type": "string",
           "format": "date-time"
-        },
-        "registerMethod": {
-          "$ref": "#/definitions/v1RegisterMethod"
         }
       }
     },
@@ -995,6 +858,22 @@
           "items": {
             "type": "string"
           }
+        }
+      }
+    },
+    "v1ShareMachineResponse": {
+      "type": "object",
+      "properties": {
+        "machine": {
+          "$ref": "#/definitions/v1Machine"
+        }
+      }
+    },
+    "v1UnshareMachineResponse": {
+      "type": "object",
+      "properties": {
+        "machine": {
+          "$ref": "#/definitions/v1Machine"
         }
       }
     }

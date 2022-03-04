@@ -1,6 +1,3 @@
 # Glossary
 
-| Term      | Description                                                                                                           |
-| --------- | --------------------------------------------------------------------------------------------------------------------- |
-| Machine   | A machine is a single entity connected to `headscale`, typically an installation of Tailscale. Also known as **Node** |
-| Namespace | A namespace is a logical grouping of machines "owned" by the same entity, in Tailscale, this is typically a User      |
+- Namespace: Collection of Tailscale nodes that can see each other. In Tailscale.com this is called Tailnet.

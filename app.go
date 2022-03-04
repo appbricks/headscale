@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"net"
 	"net/http"
 	"net/url"
@@ -27,6 +26,7 @@ import (
 	zerolog "github.com/philip-bui/grpc-zerolog"
 	zl "github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
+	"github.com/soheilhy/cmux"
 	ginprometheus "github.com/zsais/go-gin-prometheus"
 	"golang.org/x/crypto/acme"
 	"golang.org/x/crypto/acme/autocert"
@@ -35,7 +35,6 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/reflection"
@@ -48,36 +47,25 @@ import (
 )
 
 const (
-	AuthPrefix         = "Bearer "
-	Postgres           = "postgres"
-	Sqlite             = "sqlite3"
-	updateInterval     = 5000
-	HTTPReadTimeout    = 30 * time.Second
-	privateKeyFileMode = 0o600
-
-	registerCacheExpiration = time.Minute * 15
-	registerCacheCleanup    = time.Minute * 20
+	AuthPrefix      = "Bearer "
+	Postgres        = "postgresql"
+	Sqlite          = "sqlite3"
+	updateInterval  = 5000
+	HTTPReadTimeout = 30 * time.Second
 
 	errUnsupportedDatabase                 = Error("unsupported DB")
 	errUnsupportedLetsEncryptChallengeType = Error(
 		"unknown value for Lets Encrypt challenge type",
 	)
-
-	DisabledClientAuth = "disabled"
-	RelaxedClientAuth  = "relaxed"
-	EnforcedClientAuth = "enforced"
 )
 
 // Config contains the initial Headscale configuration.
 type Config struct {
 	ServerURL                      string
 	Addr                           string
-	MetricsAddr                    string
-	GRPCAddr                       string
-	GRPCAllowInsecure              bool
-	EphemeralNodeInactivityTimeout time.Duration
-	IPPrefixes                     []netaddr.IPPrefix
 	PrivateKeyPath                 string
+	EphemeralNodeInactivityTimeout time.Duration
+	IPPrefix                       netaddr.IPPrefix
 	BaseDomain                     string
 
 	DERP DERPConfig
@@ -95,28 +83,29 @@ type Config struct {
 	TLSLetsEncryptCacheDir      string
 	TLSLetsEncryptChallengeType string
 
-	TLSCertPath       string
-	TLSKeyPath        string
-	TLSClientAuthMode tls.ClientAuthType
+	TLSCertPath string
+	TLSKeyPath  string
 
 	ACMEURL   string
 	ACMEEmail string
 
 	DNSConfig *tailcfg.DNSConfig
 
-	UnixSocket           string
-	UnixSocketPermission fs.FileMode
+	UnixSocket string
 
 	OIDC OIDCConfig
 
 	CLI CLIConfig
+
+	MaxMachineRegistrationDuration     time.Duration
+	DefaultMachineRegistrationDuration time.Duration
 }
 
 type OIDCConfig struct {
-	Issuer           string
-	ClientID         string
-	ClientSecret     string
-	StripEmaildomain bool
+	Issuer       string
+	ClientID     string
+	ClientSecret string
+	MatchMap     map[string]string
 }
 
 type DERPConfig struct {
@@ -129,8 +118,8 @@ type DERPConfig struct {
 type CLIConfig struct {
 	Address  string
 	APIKey   string
-	Timeout  time.Duration
 	Insecure bool
+	Timeout  time.Duration
 }
 
 // Headscale represents the base app of the service.
@@ -140,7 +129,8 @@ type Headscale struct {
 	dbString   string
 	dbType     string
 	dbDebug    bool
-	privateKey *key.MachinePrivate
+	publicKey  key.MachinePublic
+	privateKey key.MachinePrivate
 
 	DERPMap *tailcfg.DERPMap
 
@@ -149,41 +139,24 @@ type Headscale struct {
 
 	lastStateChange sync.Map
 
-	oidcProvider *oidc.Provider
-	oauth2Config *oauth2.Config
-
-	registrationCache *cache.Cache
-
-	ipAllocationMutex sync.Mutex
-}
-
-// Look up the TLS constant relative to user-supplied TLS client
-// authentication mode. If an unknown mode is supplied, the default
-// value, tls.RequireAnyClientCert, is returned. The returned boolean
-// indicates if the supplied mode was valid.
-func LookupTLSClientAuthMode(mode string) (tls.ClientAuthType, bool) {
-	switch mode {
-	case DisabledClientAuth:
-		// Client cert is _not_ required.
-		return tls.NoClientCert, true
-	case RelaxedClientAuth:
-		// Client cert required, but _not verified_.
-		return tls.RequireAnyClientCert, true
-	case EnforcedClientAuth:
-		// Client cert is _required and verified_.
-		return tls.RequireAndVerifyClientCert, true
-	default:
-		// Return the default when an unknown value is supplied.
-		return tls.RequireAnyClientCert, false
-	}
+	oidcProvider   *oidc.Provider
+	oauth2Config   *oauth2.Config
+	oidcStateCache *cache.Cache
 }
 
 // NewHeadscale returns the Headscale app.
 func NewHeadscale(cfg Config) (*Headscale, error) {
-	privKey, err := readOrCreatePrivateKey(cfg.PrivateKeyPath)
+	content, err := os.ReadFile(cfg.PrivateKeyPath)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read or create private key: %w", err)
+		return nil, err
 	}
+
+	privKey := key.MachinePrivate{}
+	err = privKey.UnmarshalText(content)
+	if err != nil {
+		return nil, err
+	}
+	pubKey := privKey.Public()
 
 	var dbString string
 	switch cfg.DBtype {
@@ -202,18 +175,13 @@ func NewHeadscale(cfg Config) (*Headscale, error) {
 		return nil, errUnsupportedDatabase
 	}
 
-	registrationCache := cache.New(
-		registerCacheExpiration,
-		registerCacheCleanup,
-	)
-
 	app := Headscale{
-		cfg:               cfg,
-		dbType:            cfg.DBtype,
-		dbString:          dbString,
-		privateKey:        privKey,
-		aclRules:          tailcfg.FilterAllowAll, // default allowall
-		registrationCache: registrationCache,
+		cfg:        cfg,
+		dbType:     cfg.DBtype,
+		dbString:   dbString,
+		privateKey: privKey,
+		publicKey:  pubKey,
+		aclRules:   tailcfg.FilterAllowAll, // default allowall
 	}
 
 	err = app.initDB()
@@ -229,7 +197,9 @@ func NewHeadscale(cfg Config) (*Headscale, error) {
 	}
 
 	if app.cfg.DNSConfig != nil && app.cfg.DNSConfig.Proxied { // if MagicDNS
-		magicDNSDomains := generateMagicDNSRootDomains(app.cfg.IPPrefixes)
+		magicDNSDomains := generateMagicDNSRootDomains(
+			app.cfg.IPPrefix,
+		)
 		// we might have routes already from Split DNS
 		if app.cfg.DNSConfig.Routes == nil {
 			app.cfg.DNSConfig.Routes = make(map[string][]dnstype.Resolver)
@@ -299,6 +269,20 @@ func (h *Headscale) expireEphemeralNodesWorker() {
 	}
 }
 
+// WatchForKVUpdates checks the KV DB table for requests to perform tailnet upgrades
+// This is a way to communitate the CLI with the headscale server.
+func (h *Headscale) watchForKVUpdates(milliSeconds int64) {
+	ticker := time.NewTicker(time.Duration(milliSeconds) * time.Millisecond)
+	for range ticker.C {
+		h.watchForKVUpdatesWorker()
+	}
+}
+
+func (h *Headscale) watchForKVUpdatesWorker() {
+	h.checkForNamespacesPendingUpdates()
+	// more functions will come here in the future
+}
+
 func (h *Headscale) grpcAuthenticationInterceptor(ctx context.Context,
 	req interface{},
 	info *grpc.UnaryServerInfo,
@@ -355,26 +339,26 @@ func (h *Headscale) grpcAuthenticationInterceptor(ctx context.Context,
 		)
 	}
 
-	valid, err := h.ValidateAPIKey(strings.TrimPrefix(token, AuthPrefix))
-	if err != nil {
-		log.Error().
-			Caller().
-			Err(err).
-			Str("client_address", client.Addr.String()).
-			Msg("failed to validate token")
+	// TODO(kradalby): Implement API key backend:
+	// - Table in the DB
+	// - Key name
+	// - Encrypted
+	// - Expiry
+	//
+	// Currently all other than localhost traffic is unauthorized, this is intentional to allow
+	// us to make use of gRPC for our CLI, but not having to implement any of the remote capabilities
+	// and API key auth
+	return ctx, status.Error(
+		codes.Unauthenticated,
+		"Authentication is not implemented yet",
+	)
 
-		return ctx, status.Error(codes.Internal, "failed to validate token")
-	}
+	// if strings.TrimPrefix(token, AUTH_PREFIX) != a.Token {
+	// 	log.Error().Caller().Str("client_address", p.Addr.String()).Msg("invalid token")
+	// 	return ctx, status.Error(codes.Unauthenticated, "invalid token")
+	// }
 
-	if !valid {
-		log.Info().
-			Str("client_address", client.Addr.String()).
-			Msg("invalid token")
-
-		return ctx, status.Error(codes.Unauthenticated, "invalid token")
-	}
-
-	return handler(ctx, req)
+	// return handler(ctx, req)
 }
 
 func (h *Headscale) httpAuthenticationMiddleware(ctx *gin.Context) {
@@ -397,30 +381,19 @@ func (h *Headscale) httpAuthenticationMiddleware(ctx *gin.Context) {
 
 	ctx.AbortWithStatus(http.StatusUnauthorized)
 
-	valid, err := h.ValidateAPIKey(strings.TrimPrefix(authHeader, AuthPrefix))
-	if err != nil {
-		log.Error().
-			Caller().
-			Err(err).
-			Str("client_address", ctx.ClientIP()).
-			Msg("failed to validate token")
+	// TODO(kradalby): Implement API key backend
+	// Currently all traffic is unauthorized, this is intentional to allow
+	// us to make use of gRPC for our CLI, but not having to implement any of the remote capabilities
+	// and API key auth
+	//
+	// if strings.TrimPrefix(authHeader, AUTH_PREFIX) != a.Token {
+	// 	log.Error().Caller().Str("client_address", c.ClientIP()).Msg("invalid token")
+	// 	c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error", "unauthorized"})
 
-		ctx.AbortWithStatus(http.StatusInternalServerError)
+	// 	return
+	// }
 
-		return
-	}
-
-	if !valid {
-		log.Info().
-			Str("client_address", ctx.ClientIP()).
-			Msg("invalid token")
-
-		ctx.AbortWithStatus(http.StatusUnauthorized)
-
-		return
-	}
-
-	ctx.Next()
+	// c.Next()
 }
 
 // ensureUnixSocketIsAbsent will check if the given path for headscales unix socket is clear
@@ -434,17 +407,82 @@ func (h *Headscale) ensureUnixSocketIsAbsent() error {
 	return os.Remove(h.cfg.UnixSocket)
 }
 
-func (h *Headscale) createPrometheusRouter() *gin.Engine {
-	promRouter := gin.Default()
+// Serve launches a GIN server with the Headscale API.
+func (h *Headscale) Serve() error {
+	var err error
+
+	ctx := context.Background()
+	ctx, cancel := context.WithCancel(ctx)
+
+	defer cancel()
+
+	err = h.ensureUnixSocketIsAbsent()
+	if err != nil {
+		panic(err)
+	}
+
+	socketListener, err := net.Listen("unix", h.cfg.UnixSocket)
+	if err != nil {
+		panic(err)
+	}
+
+	// Handle common process-killing signals so we can gracefully shut down:
+	sigc := make(chan os.Signal, 1)
+	signal.Notify(sigc, os.Interrupt, syscall.SIGTERM)
+	go func(c chan os.Signal) {
+		// Wait for a SIGINT or SIGKILL:
+		sig := <-c
+		log.Printf("Caught signal %s: shutting down.", sig)
+		// Stop listening (and unlink the socket if unix type):
+		socketListener.Close()
+		// And we're done:
+		os.Exit(0)
+	}(sigc)
+
+	networkListener, err := net.Listen("tcp", h.cfg.Addr)
+	if err != nil {
+		panic(err)
+	}
+
+	// Create the cmux object that will multiplex 2 protocols on the same port.
+	// The two following listeners will be served on the same port below gracefully.
+	networkMutex := cmux.New(networkListener)
+	// Match gRPC requests here
+	grpcListener := networkMutex.MatchWithWriters(
+		cmux.HTTP2MatchHeaderFieldSendSettings("content-type", "application/grpc"),
+		cmux.HTTP2MatchHeaderFieldSendSettings(
+			"content-type",
+			"application/grpc+proto",
+		),
+	)
+	// Otherwise match regular http requests.
+	httpListener := networkMutex.Match(cmux.Any())
+
+	grpcGatewayMux := runtime.NewServeMux()
+
+	// Make the grpc-gateway connect to grpc over socket
+	grpcGatewayConn, err := grpc.Dial(
+		h.cfg.UnixSocket,
+		[]grpc.DialOption{
+			grpc.WithInsecure(),
+			grpc.WithContextDialer(GrpcSocketDialer),
+		}...,
+	)
+	if err != nil {
+		return err
+	}
+
+	// Connect to the gRPC server over localhost to skip
+	// the authentication.
+	err = v1.RegisterHeadscaleServiceHandler(ctx, grpcGatewayMux, grpcGatewayConn)
+	if err != nil {
+		return err
+	}
+
+	router := gin.Default()
 
 	prometheus := ginprometheus.NewPrometheus("gin")
-	prometheus.Use(promRouter)
-
-	return promRouter
-}
-
-func (h *Headscale) createRouter(grpcMux *runtime.ServeMux) *gin.Engine {
-	router := gin.Default()
+	prometheus.Use(router)
 
 	router.GET(
 		"/health",
@@ -464,17 +502,10 @@ func (h *Headscale) createRouter(grpcMux *runtime.ServeMux) *gin.Engine {
 	api := router.Group("/api")
 	api.Use(h.httpAuthenticationMiddleware)
 	{
-		api.Any("/v1/*any", gin.WrapF(grpcMux.ServeHTTP))
+		api.Any("/v1/*any", gin.WrapF(grpcGatewayMux.ServeHTTP))
 	}
 
 	router.NoRoute(stdoutHandler)
-
-	return router
-}
-
-// Serve launches a GIN server with the Headscale API.
-func (h *Headscale) Serve() error {
-	var err error
 
 	// Fetch an initial DERP Map before we start serving
 	h.DERPMap = GetDERPMap(h.cfg.DERP)
@@ -485,149 +516,9 @@ func (h *Headscale) Serve() error {
 		go h.scheduledDERPMapUpdateWorker(derpMapCancelChannel)
 	}
 
+	// I HATE THIS
+	go h.watchForKVUpdates(updateInterval)
 	go h.expireEphemeralNodes(updateInterval)
-
-	if zl.GlobalLevel() == zl.TraceLevel {
-		zerolog.RespLog = true
-	} else {
-		zerolog.RespLog = false
-	}
-
-	// Prepare group for running listeners
-	errorGroup := new(errgroup.Group)
-
-	ctx := context.Background()
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	//
-	//
-	// Set up LOCAL listeners
-	//
-
-	err = h.ensureUnixSocketIsAbsent()
-	if err != nil {
-		return fmt.Errorf("unable to remove old socket file: %w", err)
-	}
-
-	socketListener, err := net.Listen("unix", h.cfg.UnixSocket)
-	if err != nil {
-		return fmt.Errorf("failed to set up gRPC socket: %w", err)
-	}
-
-	// Change socket permissions
-	if err := os.Chmod(h.cfg.UnixSocket, h.cfg.UnixSocketPermission); err != nil {
-		return fmt.Errorf("failed change permission of gRPC socket: %w", err)
-	}
-
-	// Handle common process-killing signals so we can gracefully shut down:
-	sigc := make(chan os.Signal, 1)
-	signal.Notify(sigc, os.Interrupt, syscall.SIGTERM)
-	go func(c chan os.Signal) {
-		// Wait for a SIGINT or SIGKILL:
-		sig := <-c
-		log.Printf("Caught signal %s: shutting down.", sig)
-		// Stop listening (and unlink the socket if unix type):
-		socketListener.Close()
-		// And we're done:
-		os.Exit(0)
-	}(sigc)
-
-	grpcGatewayMux := runtime.NewServeMux()
-
-	// Make the grpc-gateway connect to grpc over socket
-	grpcGatewayConn, err := grpc.Dial(
-		h.cfg.UnixSocket,
-		[]grpc.DialOption{
-			grpc.WithTransportCredentials(insecure.NewCredentials()),
-			grpc.WithContextDialer(GrpcSocketDialer),
-		}...,
-	)
-	if err != nil {
-		return err
-	}
-
-	// Connect to the gRPC server over localhost to skip
-	// the authentication.
-	err = v1.RegisterHeadscaleServiceHandler(ctx, grpcGatewayMux, grpcGatewayConn)
-	if err != nil {
-		return err
-	}
-
-	// Start the local gRPC server without TLS and without authentication
-	grpcSocket := grpc.NewServer(zerolog.UnaryInterceptor())
-
-	v1.RegisterHeadscaleServiceServer(grpcSocket, newHeadscaleV1APIServer(h))
-	reflection.Register(grpcSocket)
-
-	errorGroup.Go(func() error { return grpcSocket.Serve(socketListener) })
-
-	//
-	//
-	// Set up REMOTE listeners
-	//
-
-	tlsConfig, err := h.getTLSSettings()
-	if err != nil {
-		log.Error().Err(err).Msg("Failed to set up TLS configuration")
-
-		return err
-	}
-
-	//
-	//
-	// gRPC setup
-	//
-
-	// We are sadly not able to run gRPC and HTTPS (2.0) on the same
-	// port because the connection mux does not support matching them
-	// since they are so similar. There is multiple issues open and we
-	// can revisit this if changes:
-	// https://github.com/soheilhy/cmux/issues/68
-	// https://github.com/soheilhy/cmux/issues/91
-
-	if tlsConfig != nil || h.cfg.GRPCAllowInsecure {
-		log.Info().Msgf("Enabling remote gRPC at %s", h.cfg.GRPCAddr)
-
-		grpcOptions := []grpc.ServerOption{
-			grpc.UnaryInterceptor(
-				grpc_middleware.ChainUnaryServer(
-					h.grpcAuthenticationInterceptor,
-					zerolog.NewUnaryServerInterceptor(),
-				),
-			),
-		}
-
-		if tlsConfig != nil {
-			grpcOptions = append(grpcOptions,
-				grpc.Creds(credentials.NewTLS(tlsConfig)),
-			)
-		} else {
-			log.Warn().Msg("gRPC is running without security")
-		}
-
-		grpcServer := grpc.NewServer(grpcOptions...)
-
-		v1.RegisterHeadscaleServiceServer(grpcServer, newHeadscaleV1APIServer(h))
-		reflection.Register(grpcServer)
-
-		grpcListener, err := net.Listen("tcp", h.cfg.GRPCAddr)
-		if err != nil {
-			return fmt.Errorf("failed to bind to TCP address: %w", err)
-		}
-
-		errorGroup.Go(func() error { return grpcServer.Serve(grpcListener) })
-
-		log.Info().
-			Msgf("listening and serving gRPC on: %s", h.cfg.GRPCAddr)
-	}
-
-	//
-	//
-	// HTTP setup
-	//
-
-	router := h.createRouter(grpcGatewayMux)
 
 	httpServer := &http.Server{
 		Addr:        h.cfg.Addr,
@@ -640,42 +531,65 @@ func (h *Headscale) Serve() error {
 		WriteTimeout: 0,
 	}
 
-	var httpListener net.Listener
+	if zl.GlobalLevel() == zl.TraceLevel {
+		zerolog.RespLog = true
+	} else {
+		zerolog.RespLog = false
+	}
+
+	grpcOptions := []grpc.ServerOption{
+		grpc.UnaryInterceptor(
+			grpc_middleware.ChainUnaryServer(
+				h.grpcAuthenticationInterceptor,
+				zerolog.NewUnaryServerInterceptor(),
+			),
+		),
+	}
+
+	tlsConfig, err := h.getTLSSettings()
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to set up TLS configuration")
+
+		return err
+	}
+
 	if tlsConfig != nil {
 		httpServer.TLSConfig = tlsConfig
-		httpListener, err = tls.Listen("tcp", h.cfg.Addr, tlsConfig)
+
+		grpcOptions = append(grpcOptions, grpc.Creds(credentials.NewTLS(tlsConfig)))
+	}
+
+	grpcServer := grpc.NewServer(grpcOptions...)
+
+	// Start the local gRPC server without TLS and without authentication
+	grpcSocket := grpc.NewServer(zerolog.UnaryInterceptor())
+
+	v1.RegisterHeadscaleServiceServer(grpcServer, newHeadscaleV1APIServer(h))
+	v1.RegisterHeadscaleServiceServer(grpcSocket, newHeadscaleV1APIServer(h))
+	reflection.Register(grpcServer)
+	reflection.Register(grpcSocket)
+
+	errorGroup := new(errgroup.Group)
+
+	errorGroup.Go(func() error { return grpcSocket.Serve(socketListener) })
+
+	// TODO(kradalby): Verify if we need the same TLS setup for gRPC as HTTP
+	errorGroup.Go(func() error { return grpcServer.Serve(grpcListener) })
+
+	if tlsConfig != nil {
+		errorGroup.Go(func() error {
+			tlsl := tls.NewListener(httpListener, tlsConfig)
+
+			return httpServer.Serve(tlsl)
+		})
 	} else {
-		httpListener, err = net.Listen("tcp", h.cfg.Addr)
-	}
-	if err != nil {
-		return fmt.Errorf("failed to bind to TCP address: %w", err)
+		errorGroup.Go(func() error { return httpServer.Serve(httpListener) })
 	}
 
-	errorGroup.Go(func() error { return httpServer.Serve(httpListener) })
+	errorGroup.Go(func() error { return networkMutex.Serve() })
 
 	log.Info().
-		Msgf("listening and serving HTTP on: %s", h.cfg.Addr)
-
-	promRouter := h.createPrometheusRouter()
-
-	promHTTPServer := &http.Server{
-		Addr:         h.cfg.MetricsAddr,
-		Handler:      promRouter,
-		ReadTimeout:  HTTPReadTimeout,
-		WriteTimeout: 0,
-	}
-
-	var promHTTPListener net.Listener
-	promHTTPListener, err = net.Listen("tcp", h.cfg.MetricsAddr)
-
-	if err != nil {
-		return fmt.Errorf("failed to bind to TCP address: %w", err)
-	}
-
-	errorGroup.Go(func() error { return promHTTPServer.Serve(promHTTPListener) })
-
-	log.Info().
-		Msgf("listening and serving metrics on: %s", h.cfg.MetricsAddr)
+		Msgf("listening and serving (multiplexed HTTP and gRPC) on: %s", h.cfg.Addr)
 
 	return errorGroup.Wait()
 }
@@ -711,7 +625,6 @@ func (h *Headscale) getTLSSettings() (*tls.Config, error) {
 			// service, which can be configured to run on any other port.
 			go func() {
 				log.Fatal().
-					Caller().
 					Err(http.ListenAndServe(h.cfg.TLSLetsEncryptListen, certManager.HTTPHandler(http.HandlerFunc(h.redirect)))).
 					Msg("failed to set up a HTTP server")
 			}()
@@ -731,18 +644,12 @@ func (h *Headscale) getTLSSettings() (*tls.Config, error) {
 		if !strings.HasPrefix(h.cfg.ServerURL, "https://") {
 			log.Warn().Msg("Listening with TLS but ServerURL does not start with https://")
 		}
-
-		log.Info().Msg(fmt.Sprintf(
-			"Client authentication (mTLS) is \"%s\". See the docs to learn about configuring this setting.",
-			h.cfg.TLSClientAuthMode))
-
 		tlsConfig := &tls.Config{
-			ClientAuth:   h.cfg.TLSClientAuthMode,
+			ClientAuth:   tls.RequireAnyClientCert,
 			NextProtos:   []string{"http/1.1"},
 			Certificates: make([]tls.Certificate, 1),
 			MinVersion:   tls.VersionTLS12,
 		}
-
 		tlsConfig.Certificates[0], err = tls.LoadX509KeyPair(h.cfg.TLSCertPath, h.cfg.TLSKeyPath)
 
 		return tlsConfig, err
@@ -788,48 +695,4 @@ func stdoutHandler(ctx *gin.Context) {
 		Interface("url", ctx.Request.URL).
 		Bytes("body", body).
 		Msg("Request did not match")
-}
-
-func readOrCreatePrivateKey(path string) (*key.MachinePrivate, error) {
-	privateKey, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		log.Info().Str("path", path).Msg("No private key file at path, creating...")
-
-		machineKey := key.NewMachine()
-
-		machineKeyStr, err := machineKey.MarshalText()
-		if err != nil {
-			return nil, fmt.Errorf(
-				"failed to convert private key to string for saving: %w",
-				err,
-			)
-		}
-		err = os.WriteFile(path, machineKeyStr, privateKeyFileMode)
-		if err != nil {
-			return nil, fmt.Errorf(
-				"failed to save private key to disk: %w",
-				err,
-			)
-		}
-
-		return &machineKey, nil
-	} else if err != nil {
-		return nil, fmt.Errorf("failed to read private key file: %w", err)
-	}
-
-	trimmedPrivateKey := strings.TrimSpace(string(privateKey))
-	privateKeyEnsurePrefix := PrivateKeyEnsurePrefix(trimmedPrivateKey)
-
-	var machineKey key.MachinePrivate
-	if err = machineKey.UnmarshalText([]byte(privateKeyEnsurePrefix)); err != nil {
-		log.Info().
-			Str("path", path).
-			Msg("This might be due to a legacy (headscale pre-0.12) private key. " +
-				"If the key is in WireGuard format, delete the key and restart headscale. " +
-				"A new key will automatically be generated. All Tailscale clients will have to be restarted")
-
-		return nil, fmt.Errorf("failed to parse private key: %w", err)
-	}
-
-	return &machineKey, nil
 }

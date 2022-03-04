@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	DefaultPreAuthKeyExpiry = 1 * time.Hour
+	DefaultPreAuthKeyExpiry = 24 * time.Hour
 )
 
 func init() {
@@ -35,15 +35,13 @@ func init() {
 }
 
 var preauthkeysCmd = &cobra.Command{
-	Use:     "preauthkeys",
-	Short:   "Handle the preauthkeys in Headscale",
-	Aliases: []string{"preauthkey", "authkey", "pre"},
+	Use:   "preauthkeys",
+	Short: "Handle the preauthkeys in Headscale",
 }
 
 var listPreAuthKeys = &cobra.Command{
-	Use:     "list",
-	Short:   "List the preauthkeys for this namespace",
-	Aliases: []string{"ls", "show"},
+	Use:   "list",
+	Short: "List the preauthkeys for this namespace",
 	Run: func(cmd *cobra.Command, args []string) {
 		output, _ := cmd.Flags().GetString("output")
 
@@ -85,7 +83,7 @@ var listPreAuthKeys = &cobra.Command{
 		for _, key := range response.PreAuthKeys {
 			expiration := "-"
 			if key.GetExpiration() != nil {
-				expiration = ColourTime(key.Expiration.AsTime())
+				expiration = key.Expiration.AsTime().Format("2006-01-02 15:04:05")
 			}
 
 			var reusable string
@@ -120,9 +118,8 @@ var listPreAuthKeys = &cobra.Command{
 }
 
 var createPreAuthKeyCmd = &cobra.Command{
-	Use:     "create",
-	Short:   "Creates a new preauthkey in the specified namespace",
-	Aliases: []string{"c", "new"},
+	Use:   "create",
+	Short: "Creates a new preauthkey in the specified namespace",
 	Run: func(cmd *cobra.Command, args []string) {
 		output, _ := cmd.Flags().GetString("output")
 
@@ -148,12 +145,14 @@ var createPreAuthKeyCmd = &cobra.Command{
 			Ephemeral: ephemeral,
 		}
 
-		duration, _ := cmd.Flags().GetDuration("expiration")
-		expiration := time.Now().UTC().Add(duration)
+		if cmd.Flags().Changed("expiration") {
+			duration, _ := cmd.Flags().GetDuration("expiration")
+			expiration := time.Now().UTC().Add(duration)
 
-		log.Trace().Dur("expiration", duration).Msg("expiration has been set")
+			log.Trace().Dur("expiration", duration).Msg("expiration has been set")
 
-		request.Expiration = timestamppb.New(expiration)
+			request.Expiration = timestamppb.New(expiration)
+		}
 
 		ctx, client, conn, cancel := getHeadscaleCLIClient()
 		defer cancel()
@@ -175,9 +174,8 @@ var createPreAuthKeyCmd = &cobra.Command{
 }
 
 var expirePreAuthKeyCmd = &cobra.Command{
-	Use:     "expire KEY",
-	Short:   "Expire a preauthkey",
-	Aliases: []string{"revoke", "exp", "e"},
+	Use:   "expire KEY",
+	Short: "Expire a preauthkey",
 	Args: func(cmd *cobra.Command, args []string) error {
 		if len(args) < 1 {
 			return errMissingParameter

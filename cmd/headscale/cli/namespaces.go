@@ -25,15 +25,13 @@ const (
 )
 
 var namespaceCmd = &cobra.Command{
-	Use:     "namespaces",
-	Short:   "Manage the namespaces of Headscale",
-	Aliases: []string{"namespace", "ns", "user", "users"},
+	Use:   "namespaces",
+	Short: "Manage the namespaces of Headscale",
 }
 
 var createNamespaceCmd = &cobra.Command{
-	Use:     "create NAME",
-	Short:   "Creates a new namespace",
-	Aliases: []string{"c", "new"},
+	Use:   "create NAME",
+	Short: "Creates a new namespace",
 	Args: func(cmd *cobra.Command, args []string) error {
 		if len(args) < 1 {
 			return errMissingParameter
@@ -74,9 +72,8 @@ var createNamespaceCmd = &cobra.Command{
 }
 
 var destroyNamespaceCmd = &cobra.Command{
-	Use:     "destroy NAME",
-	Short:   "Destroys a namespace",
-	Aliases: []string{"delete"},
+	Use:   "destroy NAME",
+	Short: "Destroys a namespace",
 	Args: func(cmd *cobra.Command, args []string) error {
 		if len(args) < 1 {
 			return errMissingParameter
@@ -147,9 +144,8 @@ var destroyNamespaceCmd = &cobra.Command{
 }
 
 var listNamespacesCmd = &cobra.Command{
-	Use:     "list",
-	Short:   "List all the namespaces",
-	Aliases: []string{"ls", "show"},
+	Use:   "list",
+	Short: "List all the namespaces",
 	Run: func(cmd *cobra.Command, args []string) {
 		output, _ := cmd.Flags().GetString("output")
 
@@ -201,9 +197,8 @@ var listNamespacesCmd = &cobra.Command{
 }
 
 var renameNamespaceCmd = &cobra.Command{
-	Use:     "rename OLD_NAME NEW_NAME",
-	Short:   "Renames a namespace",
-	Aliases: []string{"mv"},
+	Use:   "rename OLD_NAME NEW_NAME",
+	Short: "Renames a namespace",
 	Args: func(cmd *cobra.Command, args []string) error {
 		expectedArguments := 2
 		if len(args) < expectedArguments {

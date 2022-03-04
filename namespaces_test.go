@@ -1,11 +1,9 @@
 package headscale
 
 import (
-	"testing"
-
+	"github.com/rs/zerolog/log"
 	"gopkg.in/check.v1"
 	"gorm.io/gorm"
-	"inet.af/netaddr"
 )
 
 func (s *Suite) TestCreateAndDestroyNamespace(c *check.C) {
@@ -54,7 +52,8 @@ func (s *Suite) TestDestroyNamespaceErrors(c *check.C) {
 		DiscoKey:       "faa",
 		Name:           "testmachine",
 		NamespaceID:    namespace.ID,
-		RegisterMethod: RegisterMethodAuthKey,
+		Registered:     true,
+		RegisterMethod: "authKey",
 		AuthKeyID:      uint(pak.ID),
 	}
 	app.db.Save(&machine)
@@ -72,23 +71,23 @@ func (s *Suite) TestRenameNamespace(c *check.C) {
 	c.Assert(err, check.IsNil)
 	c.Assert(len(namespaces), check.Equals, 1)
 
-	err = app.RenameNamespace("test", "test-renamed")
+	err = app.RenameNamespace("test", "test_renamed")
 	c.Assert(err, check.IsNil)
 
 	_, err = app.GetNamespace("test")
 	c.Assert(err, check.Equals, errNamespaceNotFound)
 
-	_, err = app.GetNamespace("test-renamed")
+	_, err = app.GetNamespace("test_renamed")
 	c.Assert(err, check.IsNil)
 
-	err = app.RenameNamespace("test-does-not-exit", "test")
+	err = app.RenameNamespace("test_does_not_exit", "test")
 	c.Assert(err, check.Equals, errNamespaceNotFound)
 
 	namespaceTest2, err := app.CreateNamespace("test2")
 	c.Assert(err, check.IsNil)
 	c.Assert(namespaceTest2.Name, check.Equals, "test2")
 
-	err = app.RenameNamespace("test2", "test-renamed")
+	err = app.RenameNamespace("test2", "test_renamed")
 	c.Assert(err, check.Equals, errNamespaceExists)
 }
 
@@ -145,8 +144,9 @@ func (s *Suite) TestGetMapResponseUserProfiles(c *check.C) {
 		Name:           "test_get_shared_nodes_1",
 		NamespaceID:    namespaceShared1.ID,
 		Namespace:      *namespaceShared1,
-		RegisterMethod: RegisterMethodAuthKey,
-		IPAddresses:    []netaddr.IP{netaddr.MustParseIP("100.64.0.1")},
+		Registered:     true,
+		RegisterMethod: "authKey",
+		IPAddress:      "100.64.0.1",
 		AuthKeyID:      uint(preAuthKeyShared1.ID),
 	}
 	app.db.Save(machineInShared1)
@@ -162,8 +162,9 @@ func (s *Suite) TestGetMapResponseUserProfiles(c *check.C) {
 		Name:           "test_get_shared_nodes_2",
 		NamespaceID:    namespaceShared2.ID,
 		Namespace:      *namespaceShared2,
-		RegisterMethod: RegisterMethodAuthKey,
-		IPAddresses:    []netaddr.IP{netaddr.MustParseIP("100.64.0.2")},
+		Registered:     true,
+		RegisterMethod: "authKey",
+		IPAddress:      "100.64.0.2",
 		AuthKeyID:      uint(preAuthKeyShared2.ID),
 	}
 	app.db.Save(machineInShared2)
@@ -179,8 +180,9 @@ func (s *Suite) TestGetMapResponseUserProfiles(c *check.C) {
 		Name:           "test_get_shared_nodes_3",
 		NamespaceID:    namespaceShared3.ID,
 		Namespace:      *namespaceShared3,
-		RegisterMethod: RegisterMethodAuthKey,
-		IPAddresses:    []netaddr.IP{netaddr.MustParseIP("100.64.0.3")},
+		Registered:     true,
+		RegisterMethod: "authKey",
+		IPAddress:      "100.64.0.3",
 		AuthKeyID:      uint(preAuthKeyShared3.ID),
 	}
 	app.db.Save(machineInShared3)
@@ -196,12 +198,15 @@ func (s *Suite) TestGetMapResponseUserProfiles(c *check.C) {
 		Name:           "test_get_shared_nodes_4",
 		NamespaceID:    namespaceShared1.ID,
 		Namespace:      *namespaceShared1,
-		RegisterMethod: RegisterMethodAuthKey,
-		IPAddresses:    []netaddr.IP{netaddr.MustParseIP("100.64.0.4")},
+		Registered:     true,
+		RegisterMethod: "authKey",
+		IPAddress:      "100.64.0.4",
 		AuthKeyID:      uint(preAuthKey2Shared1.ID),
 	}
 	app.db.Save(machine2InShared1)
 
+	err = app.AddSharedMachineToNamespace(machineInShared2, namespaceShared1)
+	c.Assert(err, check.IsNil)
 	peersOfMachine1InShared1, err := app.getPeers(machineInShared1)
 	c.Assert(err, check.IsNil)
 
@@ -210,7 +215,8 @@ func (s *Suite) TestGetMapResponseUserProfiles(c *check.C) {
 		peersOfMachine1InShared1,
 	)
 
-	c.Assert(len(userProfiles), check.Equals, 3)
+	log.Trace().Msgf("userProfiles %#v", userProfiles)
+	c.Assert(len(userProfiles), check.Equals, 2)
 
 	found := false
 	for _, userProfiles := range userProfiles {
@@ -231,144 +237,4 @@ func (s *Suite) TestGetMapResponseUserProfiles(c *check.C) {
 		}
 	}
 	c.Assert(found, check.Equals, true)
-}
-
-func TestNormalizeNamespaceName(t *testing.T) {
-	type args struct {
-		name             string
-		stripEmailDomain bool
-	}
-	tests := []struct {
-		name    string
-		args    args
-		want    string
-		wantErr bool
-	}{
-		{
-			name: "normalize simple name",
-			args: args{
-				name:             "normalize-simple.name",
-				stripEmailDomain: false,
-			},
-			want:    "normalize-simple.name",
-			wantErr: false,
-		},
-		{
-			name: "normalize an email",
-			args: args{
-				name:             "foo.bar@example.com",
-				stripEmailDomain: false,
-			},
-			want:    "foo.bar.example.com",
-			wantErr: false,
-		},
-		{
-			name: "normalize an email domain should be removed",
-			args: args{
-				name:             "foo.bar@example.com",
-				stripEmailDomain: true,
-			},
-			want:    "foo.bar",
-			wantErr: false,
-		},
-		{
-			name: "strip enabled no email passed as argument",
-			args: args{
-				name:             "not-email-and-strip-enabled",
-				stripEmailDomain: true,
-			},
-			want:    "not-email-and-strip-enabled",
-			wantErr: false,
-		},
-		{
-			name: "normalize complex email",
-			args: args{
-				name:             "foo.bar+complex-email@example.com",
-				stripEmailDomain: false,
-			},
-			want:    "foo.bar-complex-email.example.com",
-			wantErr: false,
-		},
-		{
-			name: "namespace name with space",
-			args: args{
-				name:             "name space",
-				stripEmailDomain: false,
-			},
-			want:    "name-space",
-			wantErr: false,
-		},
-		{
-			name: "namespace with quote",
-			args: args{
-				name:             "Jamie's iPhone 5",
-				stripEmailDomain: false,
-			},
-			want:    "jamies-iphone-5",
-			wantErr: false,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got, err := NormalizeNamespaceName(tt.args.name, tt.args.stripEmailDomain)
-			if (err != nil) != tt.wantErr {
-				t.Errorf(
-					"NormalizeNamespaceName() error = %v, wantErr %v",
-					err,
-					tt.wantErr,
-				)
-
-				return
-			}
-			if got != tt.want {
-				t.Errorf("NormalizeNamespaceName() = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
-func TestCheckNamespaceName(t *testing.T) {
-	type args struct {
-		name string
-	}
-	tests := []struct {
-		name    string
-		args    args
-		wantErr bool
-	}{
-		{
-			name:    "valid: namespace",
-			args:    args{name: "valid-namespace"},
-			wantErr: false,
-		},
-		{
-			name:    "invalid: capitalized namespace",
-			args:    args{name: "Invalid-CapItaLIzed-namespace"},
-			wantErr: true,
-		},
-		{
-			name:    "invalid: email as namespace",
-			args:    args{name: "foo.bar@example.com"},
-			wantErr: true,
-		},
-		{
-			name:    "invalid: chars in namespace name",
-			args:    args{name: "super-namespace+name"},
-			wantErr: true,
-		},
-		{
-			name: "invalid: too long name for namespace",
-			args: args{
-				name: "super-long-namespace-name-that-should-be-a-little-more-than-63-chars",
-			},
-			wantErr: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if err := CheckNamespaceName(tt.args.name); (err != nil) != tt.wantErr {
-				t.Errorf("CheckNamespaceName() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
-	}
 }

@@ -1,6 +1,9 @@
 package headscale
 
 import (
+	"encoding/json"
+
+	"gorm.io/datatypes"
 	"inet.af/netaddr"
 )
 
@@ -20,7 +23,12 @@ func (h *Headscale) GetAdvertisedNodeRoutes(
 		return nil, err
 	}
 
-	return &machine.HostInfo.RoutableIPs, nil
+	hostInfo, err := machine.GetHostInfo()
+	if err != nil {
+		return nil, err
+	}
+
+	return &hostInfo.RoutableIPs, nil
 }
 
 // Deprecated: use machine function instead
@@ -35,7 +43,27 @@ func (h *Headscale) GetEnabledNodeRoutes(
 		return nil, err
 	}
 
-	return machine.EnabledRoutes, nil
+	data, err := machine.EnabledRoutes.MarshalJSON()
+	if err != nil {
+		return nil, err
+	}
+
+	routesStr := []string{}
+	err = json.Unmarshal(data, &routesStr)
+	if err != nil {
+		return nil, err
+	}
+
+	routes := make([]netaddr.IPPrefix, len(routesStr))
+	for index, routeStr := range routesStr {
+		route, err := netaddr.ParseIPPrefix(routeStr)
+		if err != nil {
+			return nil, err
+		}
+		routes[index] = route
+	}
+
+	return routes, nil
 }
 
 // Deprecated: use machine function instead
@@ -107,8 +135,18 @@ func (h *Headscale) EnableNodeRoute(
 		return errRouteIsNotAvailable
 	}
 
-	machine.EnabledRoutes = enabledRoutes
+	routes, err := json.Marshal(enabledRoutes)
+	if err != nil {
+		return err
+	}
+
+	machine.EnabledRoutes = datatypes.JSON(routes)
 	h.db.Save(&machine)
+
+	err = h.RequestMapUpdates(machine.NamespaceID)
+	if err != nil {
+		return err
+	}
 
 	return nil
 }

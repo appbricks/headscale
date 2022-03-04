@@ -3,10 +3,12 @@ package headscale
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/juanfont/headscale/gen/go/headscale/v1"
 	"github.com/rs/zerolog/log"
+	"gorm.io/datatypes"
 	"tailscale.com/tailcfg"
 )
 
@@ -157,11 +159,9 @@ func (api headscaleV1APIServer) RegisterMachine(
 		Str("namespace", request.GetNamespace()).
 		Str("machine_key", request.GetKey()).
 		Msg("Registering machine")
-
-	machine, err := api.h.RegisterMachineFromAuthCallback(
+	machine, err := api.h.RegisterMachine(
 		request.GetKey(),
 		request.GetNamespace(),
-		RegisterMethodCLI,
 	)
 	if err != nil {
 		return nil, err
@@ -201,27 +201,6 @@ func (api headscaleV1APIServer) DeleteMachine(
 	return &v1.DeleteMachineResponse{}, nil
 }
 
-func (api headscaleV1APIServer) ExpireMachine(
-	ctx context.Context,
-	request *v1.ExpireMachineRequest,
-) (*v1.ExpireMachineResponse, error) {
-	machine, err := api.h.GetMachineByID(request.GetMachineId())
-	if err != nil {
-		return nil, err
-	}
-
-	api.h.ExpireMachine(
-		machine,
-	)
-
-	log.Trace().
-		Str("machine", machine.Name).
-		Time("expiry", *machine.Expiry).
-		Msg("machine expired")
-
-	return &v1.ExpireMachineResponse{Machine: machine.toProto()}, nil
-}
-
 func (api headscaleV1APIServer) ListMachines(
 	ctx context.Context,
 	request *v1.ListMachinesRequest,
@@ -231,6 +210,15 @@ func (api headscaleV1APIServer) ListMachines(
 		if err != nil {
 			return nil, err
 		}
+
+		sharedMachines, err := api.h.ListSharedMachinesInNamespace(
+			request.GetNamespace(),
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		machines = append(machines, sharedMachines...)
 
 		response := make([]*v1.Machine, len(machines))
 		for index, machine := range machines {
@@ -253,6 +241,50 @@ func (api headscaleV1APIServer) ListMachines(
 	return &v1.ListMachinesResponse{Machines: response}, nil
 }
 
+func (api headscaleV1APIServer) ShareMachine(
+	ctx context.Context,
+	request *v1.ShareMachineRequest,
+) (*v1.ShareMachineResponse, error) {
+	destinationNamespace, err := api.h.GetNamespace(request.GetNamespace())
+	if err != nil {
+		return nil, err
+	}
+
+	machine, err := api.h.GetMachineByID(request.GetMachineId())
+	if err != nil {
+		return nil, err
+	}
+
+	err = api.h.AddSharedMachineToNamespace(machine, destinationNamespace)
+	if err != nil {
+		return nil, err
+	}
+
+	return &v1.ShareMachineResponse{Machine: machine.toProto()}, nil
+}
+
+func (api headscaleV1APIServer) UnshareMachine(
+	ctx context.Context,
+	request *v1.UnshareMachineRequest,
+) (*v1.UnshareMachineResponse, error) {
+	destinationNamespace, err := api.h.GetNamespace(request.GetNamespace())
+	if err != nil {
+		return nil, err
+	}
+
+	machine, err := api.h.GetMachineByID(request.GetMachineId())
+	if err != nil {
+		return nil, err
+	}
+
+	err = api.h.RemoveSharedMachineFromNamespace(machine, destinationNamespace)
+	if err != nil {
+		return nil, err
+	}
+
+	return &v1.UnshareMachineResponse{Machine: machine.toProto()}, nil
+}
+
 func (api headscaleV1APIServer) GetMachineRoute(
 	ctx context.Context,
 	request *v1.GetMachineRouteRequest,
@@ -262,8 +294,13 @@ func (api headscaleV1APIServer) GetMachineRoute(
 		return nil, err
 	}
 
+	routes, err := machine.RoutesToProto()
+	if err != nil {
+		return nil, err
+	}
+
 	return &v1.GetMachineRouteResponse{
-		Routes: machine.RoutesToProto(),
+		Routes: routes,
 	}, nil
 }
 
@@ -281,65 +318,14 @@ func (api headscaleV1APIServer) EnableMachineRoutes(
 		return nil, err
 	}
 
+	routes, err := machine.RoutesToProto()
+	if err != nil {
+		return nil, err
+	}
+
 	return &v1.EnableMachineRoutesResponse{
-		Routes: machine.RoutesToProto(),
+		Routes: routes,
 	}, nil
-}
-
-func (api headscaleV1APIServer) CreateApiKey(
-	ctx context.Context,
-	request *v1.CreateApiKeyRequest,
-) (*v1.CreateApiKeyResponse, error) {
-	var expiration time.Time
-	if request.GetExpiration() != nil {
-		expiration = request.GetExpiration().AsTime()
-	}
-
-	apiKey, _, err := api.h.CreateAPIKey(
-		&expiration,
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	return &v1.CreateApiKeyResponse{ApiKey: apiKey}, nil
-}
-
-func (api headscaleV1APIServer) ExpireApiKey(
-	ctx context.Context,
-	request *v1.ExpireApiKeyRequest,
-) (*v1.ExpireApiKeyResponse, error) {
-	var apiKey *APIKey
-	var err error
-
-	apiKey, err = api.h.GetAPIKey(request.Prefix)
-	if err != nil {
-		return nil, err
-	}
-
-	err = api.h.ExpireAPIKey(apiKey)
-	if err != nil {
-		return nil, err
-	}
-
-	return &v1.ExpireApiKeyResponse{}, nil
-}
-
-func (api headscaleV1APIServer) ListApiKeys(
-	ctx context.Context,
-	request *v1.ListApiKeysRequest,
-) (*v1.ListApiKeysResponse, error) {
-	apiKeys, err := api.h.ListAPIKeys()
-	if err != nil {
-		return nil, err
-	}
-
-	response := make([]*v1.ApiKey, len(apiKeys))
-	for index, key := range apiKeys {
-		response[index] = key.toProto()
-	}
-
-	return &v1.ListApiKeysResponse{ApiKeys: response}, nil
 }
 
 // The following service calls are for testing and debugging
@@ -369,6 +355,13 @@ func (api headscaleV1APIServer) DebugCreateMachine(
 		Hostname:    "DebugTestMachine",
 	}
 
+	log.Trace().Caller().Interface("hostinfo", hostinfo).Msg("")
+
+	hostinfoJson, err := json.Marshal(hostinfo)
+	if err != nil {
+		return nil, err
+	}
+
 	newMachine := Machine{
 		MachineKey: request.GetKey(),
 		Name:       request.GetName(),
@@ -378,14 +371,14 @@ func (api headscaleV1APIServer) DebugCreateMachine(
 		LastSeen:             &time.Time{},
 		LastSuccessfulUpdate: &time.Time{},
 
-		HostInfo: HostInfo(hostinfo),
+		HostInfo: datatypes.JSON(hostinfoJson),
 	}
 
-	api.h.registrationCache.Set(
-		request.GetKey(),
-		newMachine,
-		registerCacheExpiration,
-	)
+	// log.Trace().Caller().Interface("machine", newMachine).Msg("")
+
+	if err := api.h.db.Create(&newMachine).Error; err != nil {
+		return nil, err
+	}
 
 	return &v1.DebugCreateMachineResponse{Machine: newMachine.toProto()}, nil
 }

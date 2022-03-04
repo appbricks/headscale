@@ -1,7 +1,6 @@
 package main
 
 import (
-	"io/fs"
 	"io/ioutil"
 	"os"
 	"path/filepath"
@@ -55,18 +54,13 @@ func (*Suite) TestConfigLoading(c *check.C) {
 	// Test that config file was interpreted correctly
 	c.Assert(viper.GetString("server_url"), check.Equals, "http://127.0.0.1:8080")
 	c.Assert(viper.GetString("listen_addr"), check.Equals, "0.0.0.0:8080")
-	c.Assert(viper.GetString("metrics_listen_addr"), check.Equals, "127.0.0.1:9090")
+	c.Assert(viper.GetStringSlice("derp.paths")[0], check.Equals, "derp-example.yaml")
 	c.Assert(viper.GetString("db_type"), check.Equals, "sqlite3")
-	c.Assert(viper.GetString("db_path"), check.Equals, "/var/lib/headscale/db.sqlite")
+	c.Assert(viper.GetString("db_path"), check.Equals, "db.sqlite")
 	c.Assert(viper.GetString("tls_letsencrypt_hostname"), check.Equals, "")
 	c.Assert(viper.GetString("tls_letsencrypt_listen"), check.Equals, ":http")
 	c.Assert(viper.GetString("tls_letsencrypt_challenge_type"), check.Equals, "HTTP-01")
 	c.Assert(viper.GetStringSlice("dns_config.nameservers")[0], check.Equals, "1.1.1.1")
-	c.Assert(
-		cli.GetFileMode("unix_socket_permission"),
-		check.Equals,
-		fs.FileMode(0o770),
-	)
 }
 
 func (*Suite) TestDNSConfigLoading(c *check.C) {

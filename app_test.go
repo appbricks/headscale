@@ -40,9 +40,7 @@ func (s *Suite) ResetDB(c *check.C) {
 		c.Fatal(err)
 	}
 	cfg := Config{
-		IPPrefixes: []netaddr.IPPrefix{
-			netaddr.MustParseIPPrefix("10.27.0.0/23"),
-		},
+		IPPrefix: netaddr.MustParseIPPrefix("10.27.0.0/23"),
 	}
 
 	app = Headscale{
@@ -59,21 +57,4 @@ func (s *Suite) ResetDB(c *check.C) {
 		c.Fatal(err)
 	}
 	app.db = db
-}
-
-// Enusre an error is returned when an invalid auth mode
-// is supplied.
-func (s *Suite) TestInvalidClientAuthMode(c *check.C) {
-	_, isValid := LookupTLSClientAuthMode("invalid")
-	c.Assert(isValid, check.Equals, false)
-}
-
-// Ensure that all client auth modes return a nil error.
-func (s *Suite) TestAuthModes(c *check.C) {
-	modes := []string{"disabled", "relaxed", "enforced"}
-
-	for _, v := range modes {
-		_, isValid := LookupTLSClientAuthMode(v)
-		c.Assert(isValid, check.Equals, true)
-	}
 }

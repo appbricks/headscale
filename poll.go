@@ -1,15 +1,15 @@
 package headscale
 
 import (
-	"context"
+	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/rs/zerolog/log"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 	"tailscale.com/tailcfg"
 	"tailscale.com/types/key"
@@ -35,10 +35,8 @@ func (h *Headscale) PollNetMapHandler(ctx *gin.Context) {
 		Str("id", ctx.Param("id")).
 		Msg("PollNetMapHandler called")
 	body, _ := io.ReadAll(ctx.Request.Body)
-	machineKeyStr := ctx.Param("id")
-
-	var machineKey key.MachinePublic
-	err := machineKey.UnmarshalText([]byte(MachinePublicKeyEnsurePrefix(machineKeyStr)))
+	mKey := ctx.Param("id")
+	machineKey, err := ParseMachineKey(mKey)
 	if err != nil {
 		log.Error().
 			Str("handler", "PollNetMap").
@@ -49,7 +47,7 @@ func (h *Headscale) PollNetMapHandler(ctx *gin.Context) {
 		return
 	}
 	req := tailcfg.MapRequest{}
-	err = decode(body, &req, &machineKey, h.privateKey)
+	err = decode(body, &req, machineKey, h.privateKey)
 	if err != nil {
 		log.Error().
 			Str("handler", "PollNetMap").
@@ -60,7 +58,7 @@ func (h *Headscale) PollNetMapHandler(ctx *gin.Context) {
 		return
 	}
 
-	machine, err := h.GetMachineByMachineKey(machineKey)
+	machine, err := h.GetMachineByMachineKey(machineKey.String())
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			log.Warn().
@@ -74,8 +72,6 @@ func (h *Headscale) PollNetMapHandler(ctx *gin.Context) {
 			Str("handler", "PollNetMap").
 			Msgf("Failed to fetch machine from the database with Machine key: %s", machineKey.String())
 		ctx.String(http.StatusInternalServerError, "")
-
-		return
 	}
 	log.Trace().
 		Str("handler", "PollNetMap").
@@ -83,22 +79,12 @@ func (h *Headscale) PollNetMapHandler(ctx *gin.Context) {
 		Str("machine", machine.Name).
 		Msg("Found machine in database")
 
+	hostinfo, _ := json.Marshal(req.Hostinfo)
 	machine.Name = req.Hostinfo.Hostname
-	machine.HostInfo = HostInfo(*req.Hostinfo)
-	machine.DiscoKey = DiscoPublicKeyStripPrefix(req.DiscoKey)
+	machine.HostInfo = datatypes.JSON(hostinfo)
+	machine.DiscoKey = key.DiscoPublic(req.DiscoKey).String()
 	now := time.Now().UTC()
 
-	// update ACLRules with peer informations (to update server tags if necessary)
-	if h.aclPolicy != nil {
-		err = h.UpdateACLRules()
-		if err != nil {
-			log.Error().
-				Caller().
-				Str("func", "handleAuthKey").
-				Str("machine", machine.Name).
-				Err(err)
-		}
-	}
 	// From Tailscale client:
 	//
 	// ReadOnly is whether the client just wants to fetch the MapResponse,
@@ -108,13 +94,13 @@ func (h *Headscale) PollNetMapHandler(ctx *gin.Context) {
 	// The intended use is for clients to discover the DERP map at start-up
 	// before their first real endpoint update.
 	if !req.ReadOnly {
-		machine.Endpoints = req.Endpoints
+		endpoints, _ := json.Marshal(req.Endpoints)
+		endpointTypes, _ := json.Marshal(req.EndpointTypes)
+		machine.Endpoints = datatypes.JSON(endpoints)
+		machine.EndpointTypes = datatypes.JSON(endpointTypes)
 		machine.LastSeen = &now
-
-		// *** MyCS integration
-		machine.EndpointTypes = req.EndpointTypes
 	}
-	h.db.Updates(machine)
+	h.db.Save(&machine)
 
 	data, err := h.getMapResponse(machineKey, req, machine)
 	if err != nil {
@@ -166,33 +152,14 @@ func (h *Headscale) PollNetMapHandler(ctx *gin.Context) {
 		Str("id", ctx.Param("id")).
 		Str("machine", machine.Name).
 		Msg("Loading or creating update channel")
+	updateChan := make(chan struct{})
 
-	// TODO: could probably remove all that duplication once generics land.
-	closeChanWithLog := func(channel interface{}, name string) {
-		log.Trace().
-			Str("handler", "PollNetMap").
-			Str("machine", machine.Name).
-			Str("channel", "Done").
-			Msg(fmt.Sprintf("Closing %s channel", name))
-
-		switch c := channel.(type) {
-		case (chan struct{}):
-			close(c)
-
-		case (chan []byte):
-			close(c)
-		}
-	}
-
-	const chanSize = 8
-	updateChan := make(chan struct{}, chanSize)
-	defer closeChanWithLog(updateChan, "updateChan")
-
-	pollDataChan := make(chan []byte, chanSize)
-	defer closeChanWithLog(pollDataChan, "pollDataChan")
+	pollDataChan := make(chan []byte)
 
 	keepAliveChan := make(chan []byte)
-	defer closeChanWithLog(keepAliveChan, "keepAliveChan")
+
+	cancelKeepAlive := make(chan struct{})
+	defer close(cancelKeepAlive)
 
 	if req.OmitPeers && !req.Stream {
 		log.Info().
@@ -203,9 +170,9 @@ func (h *Headscale) PollNetMapHandler(ctx *gin.Context) {
 
 		// It sounds like we should update the nodes when we have received a endpoint update
 		// even tho the comments in the tailscale code dont explicitly say so.
-		updateRequestsFromNode.WithLabelValues(machine.Namespace.Name, machine.Name, "endpoint-update").
+		updateRequestsFromNode.WithLabelValues(machine.Name, machine.Namespace.Name, "endpoint-update").
 			Inc()
-		updateChan <- struct{}{}
+		go func() { updateChan <- struct{}{} }()
 
 		return
 	} else if req.OmitPeers && req.Stream {
@@ -226,15 +193,15 @@ func (h *Headscale) PollNetMapHandler(ctx *gin.Context) {
 		Str("handler", "PollNetMap").
 		Str("machine", machine.Name).
 		Msg("Sending initial map")
-	pollDataChan <- data
+	go func() { pollDataChan <- data }()
 
 	log.Info().
 		Str("handler", "PollNetMap").
 		Str("machine", machine.Name).
 		Msg("Notifying peers")
-	updateRequestsFromNode.WithLabelValues(machine.Namespace.Name, machine.Name, "full-update").
+	updateRequestsFromNode.WithLabelValues(machine.Name, machine.Namespace.Name, "full-update").
 		Inc()
-	updateChan <- struct{}{}
+	go func() { updateChan <- struct{}{} }()
 
 	h.PollNetMapStream(
 		ctx,
@@ -244,6 +211,7 @@ func (h *Headscale) PollNetMapHandler(ctx *gin.Context) {
 		pollDataChan,
 		keepAliveChan,
 		updateChan,
+		cancelKeepAlive,
 	)
 	log.Trace().
 		Str("handler", "PollNetMap").
@@ -263,20 +231,16 @@ func (h *Headscale) PollNetMapStream(
 	pollDataChan chan []byte,
 	keepAliveChan chan []byte,
 	updateChan chan struct{},
+	cancelKeepAlive chan struct{},
 ) {
-	{
-		ctx, cancel := context.WithCancel(ctx.Request.Context())
-		defer cancel()
-
-		go h.scheduledPollWorker(
-			ctx,
-			updateChan,
-			keepAliveChan,
-			machineKey,
-			mapRequest,
-			machine,
-		)
-	}
+	go h.scheduledPollWorker(
+		cancelKeepAlive,
+		updateChan,
+		keepAliveChan,
+		machineKey,
+		mapRequest,
+		machine,
+	)
 
 	ctx.Stream(func(writer io.Writer) bool {
 		log.Trace().
@@ -325,10 +289,6 @@ func (h *Headscale) PollNetMapStream(
 					Str("channel", "pollData").
 					Err(err).
 					Msg("Cannot update machine from database")
-
-				// client has been removed from database
-				// since the stream opened, terminate connection.
-				return false
 			}
 			now := time.Now().UTC()
 			machine.LastSeen = &now
@@ -337,22 +297,13 @@ func (h *Headscale) PollNetMapStream(
 				Set(float64(now.Unix()))
 			machine.LastSuccessfulUpdate = &now
 
-			err = h.TouchMachine(machine)
-			if err != nil {
-				log.Error().
-					Str("handler", "PollNetMapStream").
-					Str("machine", machine.Name).
-					Str("channel", "pollData").
-					Err(err).
-					Msg("Cannot update machine LastSuccessfulUpdate")
-			} else {
-				log.Trace().
-					Str("handler", "PollNetMapStream").
-					Str("machine", machine.Name).
-					Str("channel", "pollData").
-					Int("bytes", len(data)).
-					Msg("Machine entry in database updated successfully after sending pollData")
-			}
+			h.db.Save(&machine)
+			log.Trace().
+				Str("handler", "PollNetMapStream").
+				Str("machine", machine.Name).
+				Str("channel", "pollData").
+				Int("bytes", len(data)).
+				Msg("Machine entry in database updated successfully after sending pollData")
 
 			return true
 
@@ -391,29 +342,16 @@ func (h *Headscale) PollNetMapStream(
 					Str("channel", "keepAlive").
 					Err(err).
 					Msg("Cannot update machine from database")
-
-				// client has been removed from database
-				// since the stream opened, terminate connection.
-				return false
 			}
 			now := time.Now().UTC()
 			machine.LastSeen = &now
-			err = h.TouchMachine(machine)
-			if err != nil {
-				log.Error().
-					Str("handler", "PollNetMapStream").
-					Str("machine", machine.Name).
-					Str("channel", "keepAlive").
-					Err(err).
-					Msg("Cannot update machine LastSeen")
-			} else {
-				log.Trace().
-					Str("handler", "PollNetMapStream").
-					Str("machine", machine.Name).
-					Str("channel", "keepAlive").
-					Int("bytes", len(data)).
-					Msg("Machine updated successfully after sending keep alive")
-			}
+			h.db.Save(&machine)
+			log.Trace().
+				Str("handler", "PollNetMapStream").
+				Str("machine", machine.Name).
+				Str("channel", "keepAlive").
+				Int("bytes", len(data)).
+				Msg("Machine updated successfully after sending keep alive")
 
 			return true
 
@@ -423,17 +361,13 @@ func (h *Headscale) PollNetMapStream(
 				Str("machine", machine.Name).
 				Str("channel", "update").
 				Msg("Received a request for update")
-			updateRequestsReceivedOnChannel.WithLabelValues(machine.Namespace.Name, machine.Name).
+			updateRequestsReceivedOnChannel.WithLabelValues(machine.Name, machine.Namespace.Name).
 				Inc()
 			if h.isOutdated(machine) {
-				var lastUpdate time.Time
-				if machine.LastSuccessfulUpdate != nil {
-					lastUpdate = *machine.LastSuccessfulUpdate
-				}
 				log.Debug().
 					Str("handler", "PollNetMapStream").
 					Str("machine", machine.Name).
-					Time("last_successful_update", lastUpdate).
+					// Time("last_successful_update", *machine.LastSuccessfulUpdate).
 					Time("last_state_change", h.getLastStateChange(machine.Namespace.Name)).
 					Msgf("There has been updates since the last successful update to %s", machine.Name)
 				data, err := h.getMapResponse(machineKey, mapRequest, machine)
@@ -453,7 +387,7 @@ func (h *Headscale) PollNetMapStream(
 						Str("channel", "update").
 						Err(err).
 						Msg("Could not write the map response")
-					updateRequestsSentToNode.WithLabelValues(machine.Namespace.Name, machine.Name, "failed").
+					updateRequestsSentToNode.WithLabelValues(machine.Name, machine.Namespace.Name, "failed").
 						Inc()
 
 					return false
@@ -463,7 +397,7 @@ func (h *Headscale) PollNetMapStream(
 					Str("machine", machine.Name).
 					Str("channel", "update").
 					Msg("Updated Map has been sent")
-				updateRequestsSentToNode.WithLabelValues(machine.Namespace.Name, machine.Name, "success").
+				updateRequestsSentToNode.WithLabelValues(machine.Name, machine.Namespace.Name, "success").
 					Inc()
 
 				// Keep track of the last successful update,
@@ -481,10 +415,6 @@ func (h *Headscale) PollNetMapStream(
 						Str("channel", "update").
 						Err(err).
 						Msg("Cannot update machine from database")
-
-					// client has been removed from database
-					// since the stream opened, terminate connection.
-					return false
 				}
 				now := time.Now().UTC()
 
@@ -492,24 +422,12 @@ func (h *Headscale) PollNetMapStream(
 					Set(float64(now.Unix()))
 				machine.LastSuccessfulUpdate = &now
 
-				err = h.TouchMachine(machine)
-				if err != nil {
-					log.Error().
-						Str("handler", "PollNetMapStream").
-						Str("machine", machine.Name).
-						Str("channel", "update").
-						Err(err).
-						Msg("Cannot update machine LastSuccessfulUpdate")
-				}
+				h.db.Save(&machine)
 			} else {
-				var lastUpdate time.Time
-				if machine.LastSuccessfulUpdate != nil {
-					lastUpdate = *machine.LastSuccessfulUpdate
-				}
 				log.Trace().
 					Str("handler", "PollNetMapStream").
 					Str("machine", machine.Name).
-					Time("last_successful_update", lastUpdate).
+					Time("last_successful_update", *machine.LastSuccessfulUpdate).
 					Time("last_state_change", h.getLastStateChange(machine.Namespace.Name)).
 					Msgf("%s is up to date", machine.Name)
 			}
@@ -532,22 +450,39 @@ func (h *Headscale) PollNetMapStream(
 					Str("channel", "Done").
 					Err(err).
 					Msg("Cannot update machine from database")
-
-				// client has been removed from database
-				// since the stream opened, terminate connection.
-				return false
 			}
 			now := time.Now().UTC()
 			machine.LastSeen = &now
-			err = h.TouchMachine(machine)
-			if err != nil {
-				log.Error().
-					Str("handler", "PollNetMapStream").
-					Str("machine", machine.Name).
-					Str("channel", "Done").
-					Err(err).
-					Msg("Cannot update machine LastSeen")
-			}
+			h.db.Save(&machine)
+
+			log.Trace().
+				Str("handler", "PollNetMapStream").
+				Str("machine", machine.Name).
+				Str("channel", "Done").
+				Msg("Cancelling keepAlive channel")
+			cancelKeepAlive <- struct{}{}
+
+			log.Trace().
+				Str("handler", "PollNetMapStream").
+				Str("machine", machine.Name).
+				Str("channel", "Done").
+				Msg("Closing update channel")
+			// h.closeUpdateChannel(m)
+			close(updateChan)
+
+			log.Trace().
+				Str("handler", "PollNetMapStream").
+				Str("machine", machine.Name).
+				Str("channel", "Done").
+				Msg("Closing pollData channel")
+			close(pollDataChan)
+
+			log.Trace().
+				Str("handler", "PollNetMapStream").
+				Str("machine", machine.Name).
+				Str("channel", "Done").
+				Msg("Closing keepAliveChan channel")
+			close(keepAliveChan)
 
 			return false
 		}
@@ -555,7 +490,7 @@ func (h *Headscale) PollNetMapStream(
 }
 
 func (h *Headscale) scheduledPollWorker(
-	ctx context.Context,
+	cancelChan <-chan struct{},
 	updateChan chan<- struct{},
 	keepAliveChan chan<- []byte,
 	machineKey key.MachinePublic,
@@ -567,7 +502,7 @@ func (h *Headscale) scheduledPollWorker(
 
 	for {
 		select {
-		case <-ctx.Done():
+		case <-cancelChan:
 			return
 
 		case <-keepAliveTicker.C:
@@ -592,7 +527,7 @@ func (h *Headscale) scheduledPollWorker(
 				Str("func", "scheduledPollWorker").
 				Str("machine", machine.Name).
 				Msg("Sending update request")
-			updateRequestsFromNode.WithLabelValues(machine.Namespace.Name, machine.Name, "scheduled-update").
+			updateRequestsFromNode.WithLabelValues(machine.Name, machine.Namespace.Name, "scheduled-update").
 				Inc()
 			updateChan <- struct{}{}
 		}

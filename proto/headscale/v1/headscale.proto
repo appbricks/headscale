@@ -8,7 +8,6 @@ import "headscale/v1/namespace.proto";
 import "headscale/v1/preauthkey.proto";
 import "headscale/v1/machine.proto";
 import "headscale/v1/routes.proto";
-import "headscale/v1/apikey.proto";
 // import "headscale/v1/device.proto";
 
 service HeadscaleService {
@@ -93,15 +92,21 @@ service HeadscaleService {
         };
     }
 
-    rpc ExpireMachine(ExpireMachineRequest) returns (ExpireMachineResponse) {
-        option (google.api.http) = {
-            post: "/api/v1/machine/{machine_id}/expire"
-        };
-    }
-
     rpc ListMachines(ListMachinesRequest) returns (ListMachinesResponse) {
         option (google.api.http) = {
             get: "/api/v1/machine"
+        };
+    }
+
+    rpc ShareMachine(ShareMachineRequest) returns (ShareMachineResponse) {
+        option (google.api.http) = {
+            post: "/api/v1/machine/{machine_id}/share/{namespace}"
+        };
+    }
+
+    rpc UnshareMachine(UnshareMachineRequest) returns (UnshareMachineResponse) {
+        option (google.api.http) = {
+            post: "/api/v1/machine/{machine_id}/unshare/{namespace}"
         };
     }
     // --- Machine end ---
@@ -119,28 +124,6 @@ service HeadscaleService {
         };
     }
     // --- Route end ---
-
-    // --- ApiKeys start ---
-    rpc CreateApiKey(CreateApiKeyRequest) returns (CreateApiKeyResponse) {
-        option (google.api.http) = {
-            post: "/api/v1/apikey"
-            body: "*"
-        };
-    }
-
-    rpc ExpireApiKey(ExpireApiKeyRequest) returns (ExpireApiKeyResponse) {
-        option (google.api.http) = {
-            post: "/api/v1/apikey/expire"
-            body: "*"
-        };
-    }
-
-    rpc ListApiKeys(ListApiKeysRequest) returns (ListApiKeysResponse) {
-        option (google.api.http) = {
-            get: "/api/v1/apikey"
-        };
-    }
-    // --- ApiKeys end ---
 
     // Implement Tailscale API
     // rpc GetDevice(GetDeviceRequest) returns(GetDeviceResponse) {
