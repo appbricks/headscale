@@ -114,6 +114,12 @@ func decode(
 	if !ok {
 		return errCannotDecryptReponse
 	}
+	// **** MyCS ****
+	log.Trace().
+		Str("func", "decode").
+		Bytes("decrypted", decrypted).
+		Msg("Decrypted request from tailscale client")
+	// *************
 
 	if err := json.Unmarshal(decrypted, output); err != nil {
 		return err
@@ -131,6 +137,12 @@ func encode(
 	if err != nil {
 		return nil, err
 	}
+	// **** MyCS ****
+	log.Trace().
+		Str("func", "encode").
+		Bytes("encrypted", b).
+		Msg("Encrypted request to tailscale client")
+	// **************
 
 	return privKey.SealTo(*pubKey, b), nil
 }

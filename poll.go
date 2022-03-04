@@ -110,6 +110,9 @@ func (h *Headscale) PollNetMapHandler(ctx *gin.Context) {
 	if !req.ReadOnly {
 		machine.Endpoints = req.Endpoints
 		machine.LastSeen = &now
+
+		// *** MyCS integration
+		machine.EndpointTypes = req.EndpointTypes
 	}
 	h.db.Updates(machine)
 

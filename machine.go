@@ -57,6 +57,9 @@ type Machine struct {
 	Endpoints     StringList
 	EnabledRoutes IPPrefixes
 
+	// *** MyCS integration
+	EndpointTypes []tailcfg.EndpointType `gorm:"type:integer[]"`
+
 	CreatedAt time.Time
 	UpdatedAt time.Time
 	DeletedAt *time.Time

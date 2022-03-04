@@ -287,6 +287,12 @@ func (h *Headscale) getMapResponse(
 
 			return nil, err
 		}
+		// **** MyCS ****
+		log.Trace().
+			Str("func", "getMapResponse").
+			Bytes("mapResponse", src).
+			Msg("Map response to be sent to tailscale client.")
+		// **************
 
 		encoder, _ := zstd.NewWriter(nil)
 		srcCompressed := encoder.EncodeAll(src, nil)
