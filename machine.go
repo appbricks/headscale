@@ -504,7 +504,7 @@ func (machine Machine) toNode(
 		}
 	}
 
-	hostinfo := tailcfg.Hostinfo{}
+	hostinfo := &tailcfg.Hostinfo{}
 	if len(machine.HostInfo) != 0 {
 		hi, err := machine.HostInfo.MarshalJSON()
 		if err != nil {
@@ -558,7 +558,8 @@ func (machine Machine) toNode(
 		Endpoints:  endpoints,
 		DERP:       derp,
 
-		Hostinfo: hostinfo,
+		Hostinfo: hostinfo.View(),
+
 		Created:  machine.CreatedAt,
 		LastSeen: machine.LastSeen,
 
