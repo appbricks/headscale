@@ -45,22 +45,21 @@ type registerWebAPITemplateConfig struct {
 }
 
 var registerWebAPITemplate = template.Must(
-	template.New("registerweb").Parse(`<html>
+	template.New("registerweb").Parse(`
+<html>
+	<head>
+		<title>Registration - Headscale</title>
+	</head>
 	<body>
-	<h1>headscale</h1>
-	<p>
-		Run the command below in the headscale server to add this machine to your network:
-	</p>
-
-	<p>
-		<code>
-			<b>headscale -n NAMESPACE nodes register --key {{.Key}}</b>
-		</code>
-	</p>
-
+		<h1>headscale</h1>
+		<h2>Machine registration</h2>
+		<p>
+			Run the command below in the headscale server to add this machine to your network:
+		</p>
+		<pre><code>headscale -n NAMESPACE nodes register --key {{.Key}}</code></pre>
 	</body>
-	</html>`),
-)
+</html>
+`))
 
 // RegisterWebAPI shows a simple message in the browser to point to the CLI
 // Listens in /register.
@@ -134,6 +133,19 @@ func (h *Headscale) RegistrationHandler(ctx *gin.Context) {
 
 			return
 		}
+		hname, err := NormalizeToFQDNRules(
+			req.Hostinfo.Hostname,
+			h.cfg.OIDC.StripEmaildomain,
+		)
+		if err != nil {
+			log.Error().
+				Caller().
+				Str("func", "RegistrationHandler").
+				Str("hostinfo.name", req.Hostinfo.Hostname).
+				Err(err)
+
+			return
+		}
 
 		// The machine did not have a key to authenticate, which means
 		// that we rely on a method that calls back some how (OpenID or CLI)
@@ -141,7 +153,7 @@ func (h *Headscale) RegistrationHandler(ctx *gin.Context) {
 		// happens
 		newMachine := Machine{
 			MachineKey: machineKeyStr,
-			Name:       req.Hostinfo.Hostname,
+			Name:       hname,
 			NodeKey:    NodePublicKeyStripPrefix(req.NodeKey),
 			LastSeen:   &now,
 			Expiry:     &time.Time{},
