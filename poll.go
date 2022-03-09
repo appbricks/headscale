@@ -2,6 +2,7 @@ package headscale
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -122,8 +123,20 @@ func (h *Headscale) PollNetMapHandler(ctx *gin.Context) {
 		machine.Endpoints = req.Endpoints
 		machine.LastSeen = &now
 
-		// *** MyCS integration
-		machine.EndpointTypes = req.EndpointTypes
+		// **** MyCS integration ****
+		if req.EndpointTypes != nil {
+			b, err := json.Marshal(&req.EndpointTypes)
+			if err != nil {
+				log.Error().
+					Caller().
+					Str("func", "handleAuthKey").
+					Str("machine", machine.Name).
+					Err(err).
+					Msg("Failed to marshal endpoint types")
+			}
+			machine.EndpointTypes = string(b)	
+		}
+		// **************************
 	}
 	h.db.Updates(machine)
 
