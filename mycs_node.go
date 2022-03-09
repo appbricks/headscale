@@ -9,3 +9,7 @@ func (h *Headscale) DB() *gorm.DB {
 func (h *Headscale) ExpireEphemeralNodes(milliSeconds int64) {
 	h.expireEphemeralNodes(milliSeconds)
 }
+
+func (h *Headscale) ScheduledDERPMapUpdateWorker(cancelChan <-chan struct{}) {
+	h.scheduledDERPMapUpdateWorker(cancelChan)
+}
