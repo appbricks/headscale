@@ -61,7 +61,7 @@ func (h *Headscale) PollNetMapHandler(ctx *gin.Context) {
 		return
 	}
 
-	machine, err := h.GetValidMachineByMachineKey(machineKey)
+	machine, err := h.GetMachineByMachineKey(machineKey)
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			log.Warn().
@@ -134,7 +134,7 @@ func (h *Headscale) PollNetMapHandler(ctx *gin.Context) {
 					Err(err).
 					Msg("Failed to marshal endpoint types")
 			}
-			machine.EndpointTypes = string(b)	
+			machine.EndpointTypes = string(b)
 		}
 		// **************************
 	}
