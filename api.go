@@ -607,7 +607,6 @@ func (h *Headscale) handleAuthKey(
 		machine.AuthKeyID = uint(pak.ID)
 		h.RefreshMachine(machine, registerRequest.Expiry)
 	} else {
-
 		now := time.Now().UTC()
 		machineToRegister := Machine{
 			Name:           registerRequest.Hostinfo.Hostname,
