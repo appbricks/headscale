@@ -57,8 +57,9 @@ type Machine struct {
 	Endpoints     StringList
 	EnabledRoutes IPPrefixes
 
-	// *** MyCS integration
+	// *** MyCS integration ***
 	EndpointTypes string
+	// ************************
 
 	CreatedAt time.Time
 	UpdatedAt time.Time
@@ -368,6 +369,12 @@ func (h *Headscale) ExpireMachine(machine *Machine) {
 	h.setLastStateChangeToNow(machine.Namespace.Name)
 
 	h.db.Save(machine)
+
+	// *** MyCS integration ***
+	if MachineExpiredTrigger != nil {
+		MachineExpiredTrigger(machine)
+	}
+	// ************************
 }
 
 // RefreshMachine takes a Machine struct and sets the expire field to now.
@@ -380,6 +387,12 @@ func (h *Headscale) RefreshMachine(machine *Machine, expiry time.Time) {
 	h.setLastStateChangeToNow(machine.Namespace.Name)
 
 	h.db.Save(machine)
+
+	// *** MyCS integration ***
+	if MachineRegisteredTrigger != nil {
+		MachineRegisteredTrigger(machine)
+	}
+	// ************************
 }
 
 // DeleteMachine softs deletes a Machine from the database.
@@ -711,6 +724,12 @@ func (h *Headscale) RegisterMachine(machine Machine,
 		Str("machine", machine.Name).
 		Str("ip", strings.Join(ips.ToStringSlice(), ",")).
 		Msg("Machine registered with the database")
+
+	// *** MyCS integration ***
+	if MachineRegisteredTrigger != nil {
+		MachineRegisteredTrigger(&machine)
+	}
+	// ************************
 
 	return &machine, nil
 }

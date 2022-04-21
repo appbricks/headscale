@@ -2,6 +2,11 @@ package headscale
 
 import "gorm.io/gorm"
 
+var (
+	MachineRegisteredTrigger func(machine *Machine)
+	MachineExpiredTrigger    func(machine *Machine)
+)
+
 func (h *Headscale) DB() *gorm.DB {
 	return h.db
 }
