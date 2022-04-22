@@ -1,10 +1,15 @@
 package headscale
 
-import "gorm.io/gorm"
+import (
+	"gorm.io/gorm"
+	"tailscale.com/tailcfg"
+)
 
 var (
 	MachineRegisteredTrigger func(machine *Machine)
 	MachineExpiredTrigger    func(machine *Machine)
+
+	MapTailscaleDNSConfig func(dnsConfig *tailcfg.DNSConfig)
 )
 
 func (h *Headscale) DB() *gorm.DB {
