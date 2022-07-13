@@ -16,17 +16,20 @@ jobs:
         uses: tj-actions/changed-files@v14.1
         with:
           files: |
+            *.nix
             go.*
             **/*.go
             integration_test/
             config-example.yaml
 
-      - name: Setup Go
+      - uses: cachix/install-nix-action@v16
         if: steps.changed-files.outputs.any_changed == 'true'
-        uses: actions/setup-go@v2
-        with:
-          go-version: "1.17.7"
 
       - name: Run Integration tests
         if: steps.changed-files.outputs.any_changed == 'true'
-        run: make test_integration
+        uses: nick-fields/retry@v2
+        with:
+          timeout_minutes: 240
+          max_attempts: 5
+          retry_on: error
+          command: nix develop --command -- make test_integration

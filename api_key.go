@@ -13,7 +13,6 @@ import (
 const (
 	apiPrefixLength = 7
 	apiKeyLength    = 32
-	apiKeyParts     = 2
 
 	errAPIKeyFailedToParse = Error("Failed to parse ApiKey")
 )
@@ -57,7 +56,10 @@ func (h *Headscale) CreateAPIKey(
 		Hash:       hash,
 		Expiration: expiration,
 	}
-	h.db.Save(&key)
+
+	if err := h.db.Save(&key).Error; err != nil {
+		return "", nil, fmt.Errorf("failed to save API key to database: %w", err)
+	}
 
 	return keyStr, &key, nil
 }
@@ -112,9 +114,9 @@ func (h *Headscale) ExpireAPIKey(key *APIKey) error {
 }
 
 func (h *Headscale) ValidateAPIKey(keyStr string) (bool, error) {
-	prefix, hash, err := splitAPIKey(keyStr)
-	if err != nil {
-		return false, fmt.Errorf("failed to validate api key: %w", err)
+	prefix, hash, found := strings.Cut(keyStr, ".")
+	if !found {
+		return false, errAPIKeyFailedToParse
 	}
 
 	key, err := h.GetAPIKey(prefix)
@@ -131,15 +133,6 @@ func (h *Headscale) ValidateAPIKey(keyStr string) (bool, error) {
 	}
 
 	return true, nil
-}
-
-func splitAPIKey(key string) (string, string, error) {
-	parts := strings.Split(key, ".")
-	if len(parts) != apiKeyParts {
-		return "", "", errAPIKeyFailedToParse
-	}
-
-	return parts[0], parts[1], nil
 }
 
 func (key *APIKey) toProto() *v1.ApiKey {

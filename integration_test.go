@@ -36,6 +36,7 @@ type IntegrationTestSuite struct {
 	pool      dockertest.Pool
 	network   dockertest.Network
 	headscale dockertest.Resource
+	saveLogs  bool
 
 	namespaces map[string]TestNamespace
 
@@ -43,44 +44,52 @@ type IntegrationTestSuite struct {
 }
 
 func TestIntegrationTestSuite(t *testing.T) {
+	saveLogs, err := GetEnvBool("HEADSCALE_INTEGRATION_SAVE_LOG")
+	if err != nil {
+		saveLogs = false
+	}
+
 	s := new(IntegrationTestSuite)
 
 	s.namespaces = map[string]TestNamespace{
 		"thisspace": {
-			count:      15,
+			count:      10,
 			tailscales: make(map[string]dockertest.Resource),
 		},
 		"otherspace": {
-			count:      5,
+			count:      2,
 			tailscales: make(map[string]dockertest.Resource),
 		},
 	}
+	s.saveLogs = saveLogs
 
 	suite.Run(t, s)
 
 	// HandleStats, which allows us to check if we passed and save logs
 	// is called after TearDown, so we cannot tear down containers before
 	// we have potentially saved the logs.
-	for _, scales := range s.namespaces {
-		for _, tailscale := range scales.tailscales {
-			if err := s.pool.Purge(&tailscale); err != nil {
-				log.Printf("Could not purge resource: %s\n", err)
+	if s.saveLogs {
+		for _, scales := range s.namespaces {
+			for _, tailscale := range scales.tailscales {
+				if err := s.pool.Purge(&tailscale); err != nil {
+					log.Printf("Could not purge resource: %s\n", err)
+				}
 			}
 		}
-	}
 
-	if !s.stats.Passed() {
-		err := s.saveLog(&s.headscale, "test_output")
-		if err != nil {
-			log.Printf("Could not save log: %s\n", err)
+		if !s.stats.Passed() {
+			err := s.saveLog(&s.headscale, "test_output")
+			if err != nil {
+				log.Printf("Could not save log: %s\n", err)
+			}
 		}
-	}
-	if err := s.pool.Purge(&s.headscale); err != nil {
-		log.Printf("Could not purge resource: %s\n", err)
-	}
+		if err := s.pool.Purge(&s.headscale); err != nil {
+			log.Printf("Could not purge resource: %s\n", err)
+		}
 
-	if err := s.network.Close(); err != nil {
-		log.Printf("Could not close network: %s\n", err)
+		if err := s.network.Close(); err != nil {
+			log.Printf("Could not close network: %s\n", err)
+		}
 	}
 }
 
@@ -168,16 +177,8 @@ func (s *IntegrationTestSuite) Join(
 func (s *IntegrationTestSuite) tailscaleContainer(
 	namespace, identifier, version string,
 ) (string, *dockertest.Resource) {
-	tailscaleBuildOptions := &dockertest.BuildOptions{
-		Dockerfile: "Dockerfile.tailscale",
-		ContextDir: ".",
-		BuildArgs: []docker.BuildArg{
-			{
-				Name:  "TAILSCALE_VERSION",
-				Value: version,
-			},
-		},
-	}
+	tailscaleBuildOptions := getDockerBuildOptions(version)
+
 	hostname := fmt.Sprintf(
 		"%s-tailscale-%s-%s",
 		namespace,
@@ -200,7 +201,7 @@ func (s *IntegrationTestSuite) tailscaleContainer(
 		DockerAllowNetworkAdministration,
 	)
 	if err != nil {
-		log.Fatalf("Could not start resource: %s", err)
+		log.Fatalf("Could not start tailscale container version %s: %s", version, err)
 	}
 	log.Printf("Created %s container\n", hostname)
 
@@ -217,13 +218,13 @@ func (s *IntegrationTestSuite) SetupSuite() {
 	if ppool, err := dockertest.NewPool(""); err == nil {
 		s.pool = *ppool
 	} else {
-		log.Fatalf("Could not connect to docker: %s", err)
+		s.FailNow(fmt.Sprintf("Could not connect to docker: %s", err), "")
 	}
 
 	if pnetwork, err := s.pool.CreateNetwork("headscale-test"); err == nil {
 		s.network = *pnetwork
 	} else {
-		log.Fatalf("Could not create network: %s", err)
+		s.FailNow(fmt.Sprintf("Could not create network: %s", err), "")
 	}
 
 	headscaleBuildOptions := &dockertest.BuildOptions{
@@ -233,7 +234,7 @@ func (s *IntegrationTestSuite) SetupSuite() {
 
 	currentPath, err := os.Getwd()
 	if err != nil {
-		log.Fatalf("Could not determine current path: %s", err)
+		s.FailNow(fmt.Sprintf("Could not determine current path: %s", err), "")
 	}
 
 	headscaleOptions := &dockertest.RunOptions{
@@ -245,11 +246,16 @@ func (s *IntegrationTestSuite) SetupSuite() {
 		Cmd:      []string{"headscale", "serve"},
 	}
 
+	err = s.pool.RemoveContainerByName(headscaleHostname)
+	if err != nil {
+		s.FailNow(fmt.Sprintf("Could not remove existing container before building test: %s", err), "")
+	}
+
 	log.Println("Creating headscale container")
 	if pheadscale, err := s.pool.BuildAndRunWithBuildOptions(headscaleBuildOptions, headscaleOptions, DockerRestartPolicy); err == nil {
 		s.headscale = *pheadscale
 	} else {
-		log.Fatalf("Could not start resource: %s", err)
+		s.FailNow(fmt.Sprintf("Could not start headscale container: %s", err), "")
 	}
 	log.Println("Created headscale container")
 
@@ -346,6 +352,23 @@ func (s *IntegrationTestSuite) SetupSuite() {
 }
 
 func (s *IntegrationTestSuite) TearDownSuite() {
+	if !s.saveLogs {
+		for _, scales := range s.namespaces {
+			for _, tailscale := range scales.tailscales {
+				if err := s.pool.Purge(&tailscale); err != nil {
+					log.Printf("Could not purge resource: %s\n", err)
+				}
+			}
+		}
+
+		if err := s.pool.Purge(&s.headscale); err != nil {
+			log.Printf("Could not purge resource: %s\n", err)
+		}
+
+		if err := s.network.Close(); err != nil {
+			log.Printf("Could not close network: %s\n", err)
+		}
+	}
 }
 
 func (s *IntegrationTestSuite) HandleStats(
@@ -509,7 +532,6 @@ func (s *IntegrationTestSuite) TestTailDrop() {
 	for _, scales := range s.namespaces {
 		ips, err := getIPs(scales.tailscales)
 		assert.Nil(s.T(), err)
-		assert.Nil(s.T(), err)
 
 		retry := func(times int, sleepInverval time.Duration, doWork func() error) (err error) {
 			for attempts := 0; attempts < times; attempts++ {
@@ -539,7 +561,7 @@ func (s *IntegrationTestSuite) TestTailDrop() {
 					command := []string{
 						"tailscale", "file", "cp",
 						fmt.Sprintf("/tmp/file_from_%s", hostname),
-						fmt.Sprintf("%s:", peername),
+						fmt.Sprintf("%s:", ips[peername][1]),
 					}
 					retry(10, 1*time.Second, func() error {
 						log.Printf(
@@ -584,7 +606,7 @@ func (s *IntegrationTestSuite) TestTailDrop() {
 					log.Printf(
 						"Checking file in %s (%s) from %s (%s)\n",
 						hostname,
-						ips[hostname],
+						ips[hostname][1],
 						peername,
 						ip,
 					)
@@ -607,21 +629,24 @@ func (s *IntegrationTestSuite) TestTailDrop() {
 }
 
 func (s *IntegrationTestSuite) TestPingAllPeersByHostname() {
-	for namespace, scales := range s.namespaces {
-		ips, err := getIPs(scales.tailscales)
-		assert.Nil(s.T(), err)
+	hostnames, err := getMagicFQDN(&s.headscale)
+	assert.Nil(s.T(), err)
+
+	log.Printf("Resolved hostnames: %#v", hostnames)
+	for _, scales := range s.namespaces {
 		for hostname, tailscale := range scales.tailscales {
-			for peername := range ips {
-				if peername == hostname {
+			for _, peername := range hostnames {
+				if strings.Contains(peername, hostname) {
 					continue
 				}
+
 				s.T().Run(fmt.Sprintf("%s-%s", hostname, peername), func(t *testing.T) {
 					command := []string{
 						"tailscale", "ping",
 						"--timeout=10s",
 						"--c=20",
 						"--until-direct=true",
-						fmt.Sprintf("%s.%s.headscale.net", peername, namespace),
+						peername,
 					}
 
 					log.Printf(
@@ -644,18 +669,24 @@ func (s *IntegrationTestSuite) TestPingAllPeersByHostname() {
 }
 
 func (s *IntegrationTestSuite) TestMagicDNS() {
-	for namespace, scales := range s.namespaces {
+	hostnames, err := getMagicFQDN(&s.headscale)
+	assert.Nil(s.T(), err)
+
+	log.Printf("Resolved hostnames: %#v", hostnames)
+
+	for _, scales := range s.namespaces {
 		ips, err := getIPs(scales.tailscales)
 		assert.Nil(s.T(), err)
+
 		for hostname, tailscale := range scales.tailscales {
-			for peername, ips := range ips {
-				if peername == hostname {
+			for _, peername := range hostnames {
+				if strings.Contains(peername, hostname) {
 					continue
 				}
+
 				s.T().Run(fmt.Sprintf("%s-%s", hostname, peername), func(t *testing.T) {
 					command := []string{
-						"tailscale", "ip",
-						fmt.Sprintf("%s.%s.headscale.net", peername, namespace),
+						"tailscale", "ip", peername,
 					}
 
 					log.Printf(
@@ -671,7 +702,9 @@ func (s *IntegrationTestSuite) TestMagicDNS() {
 					assert.Nil(t, err)
 					log.Printf("Result for %s: %s\n", hostname, result)
 
-					for _, ip := range ips {
+					peerBaseName := peername[:len(peername)-MachineGivenNameHashLength-1]
+					expectedAddresses := ips[peerBaseName]
+					for _, ip := range expectedAddresses {
 						assert.Contains(t, result, ip.String())
 					}
 				})

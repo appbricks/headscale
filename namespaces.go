@@ -148,6 +148,21 @@ func (h *Headscale) ListNamespaces() ([]Namespace, error) {
 	return namespaces, nil
 }
 
+func (h *Headscale) ListNamespacesStr() ([]string, error) {
+	namespaces, err := h.ListNamespaces()
+	if err != nil {
+		return []string{}, err
+	}
+
+	namespaceStrs := make([]string, len(namespaces))
+
+	for index, namespace := range namespaces {
+		namespaceStrs[index] = namespace.Name
+	}
+
+	return namespaceStrs, nil
+}
+
 // ListMachinesInNamespace gets all the nodes in a given namespace.
 func (h *Headscale) ListMachinesInNamespace(name string) ([]Machine, error) {
 	err := CheckForFQDNRules(name)
@@ -177,8 +192,10 @@ func (h *Headscale) SetMachineNamespace(machine *Machine, namespaceName string) 
 	if err != nil {
 		return err
 	}
-	machine.NamespaceID = namespace.ID
-	h.db.Save(&machine)
+	machine.Namespace = *namespace
+	if result := h.db.Save(&machine); result.Error != nil {
+		return result.Error
+	}
 
 	return nil
 }
@@ -266,21 +283,21 @@ func NormalizeToFQDNRules(name string, stripEmailDomain bool) (string, error) {
 func CheckForFQDNRules(name string) error {
 	if len(name) > labelHostnameLength {
 		return fmt.Errorf(
-			"Namespace must not be over 63 chars. %v doesn't comply with this rule: %w",
+			"DNS segment must not be over 63 chars. %v doesn't comply with this rule: %w",
 			name,
 			errInvalidNamespaceName,
 		)
 	}
 	if strings.ToLower(name) != name {
 		return fmt.Errorf(
-			"Namespace name should be lowercase. %v doesn't comply with this rule: %w",
+			"DNS segment should be lowercase. %v doesn't comply with this rule: %w",
 			name,
 			errInvalidNamespaceName,
 		)
 	}
 	if invalidCharsInNamespaceRegex.MatchString(name) {
 		return fmt.Errorf(
-			"Namespace name should only be composed of lowercase ASCII letters numbers, hyphen and dots. %v doesn't comply with theses rules: %w",
+			"DNS segment should only be composed of lowercase ASCII letters numbers, hyphen and dots. %v doesn't comply with theses rules: %w",
 			name,
 			errInvalidNamespaceName,
 		)

@@ -3,7 +3,7 @@
 This page contains the official and community contributed documentation for `headscale`.
 
 If you are having trouble with following the documentation or get unexpected results,
-please ask on [Discord](https://discord.gg/XcQxk2VHjx) instead of opening an Issue.
+please ask on [Discord](https://discord.gg/c84AZQhmpx) instead of opening an Issue.
 
 ## Official documentation
 
@@ -27,6 +27,7 @@ written by community members. It is _not_ verified by `headscale` developers.
 **It might be outdated and it might miss necessary steps**.
 
 - [Running headscale in a container](running-headscale-container.md)
+- [Running headscale on OpenBSD](running-headscale-openbsd.md)
 
 ## Misc
 

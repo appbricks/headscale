@@ -148,18 +148,11 @@ func (h *Headscale) scheduledDERPMapUpdateWorker(cancelChan <-chan struct{}) {
 		case <-ticker.C:
 			log.Info().Msg("Fetching DERPMap updates")
 			h.DERPMap = GetDERPMap(h.cfg.DERP)
-			h.DERPMap.Regions[h.DERPServer.region.RegionID] = &h.DERPServer.region
-
-			namespaces, err := h.ListNamespaces()
-			if err != nil {
-				log.Error().
-					Err(err).
-					Msg("Failed to fetch namespaces")
+			if h.cfg.DERP.ServerEnabled {
+				h.DERPMap.Regions[h.DERPServer.region.RegionID] = &h.DERPServer.region
 			}
 
-			for _, namespace := range namespaces {
-				h.setLastStateChangeToNow(namespace.Name)
-			}
+			h.setLastStateChangeToNow()
 		}
 	}
 }

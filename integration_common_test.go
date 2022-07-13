@@ -5,22 +5,42 @@ package headscale
 
 import (
 	"bytes"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
+	v1 "github.com/juanfont/headscale/gen/go/headscale/v1"
 	"github.com/ory/dockertest/v3"
 	"github.com/ory/dockertest/v3/docker"
 	"inet.af/netaddr"
 )
 
-const DOCKER_EXECUTE_TIMEOUT = 10 * time.Second
+const (
+	DOCKER_EXECUTE_TIMEOUT = 10 * time.Second
+)
 
 var (
+	errEnvVarEmpty = errors.New("getenv: environment variable empty")
+
 	IpPrefix4 = netaddr.MustParseIPPrefix("100.64.0.0/10")
 	IpPrefix6 = netaddr.MustParseIPPrefix("fd7a:115c:a1e0::/48")
 
-	tailscaleVersions = []string{"1.22.0", "1.20.4", "1.18.2", "1.16.2", "1.14.3", "1.12.3"}
+	tailscaleVersions = []string{
+		"head",
+		"unstable",
+		"1.26.0",
+		"1.24.2",
+		"1.22.2",
+		"1.20.4",
+		"1.18.2",
+		"1.16.2",
+		"1.14.3",
+		"1.12.3",
+	}
 )
 
 type TestNamespace struct {
@@ -128,6 +148,49 @@ func DockerAllowNetworkAdministration(config *docker.HostConfig) {
 	})
 }
 
+func getDockerBuildOptions(version string) *dockertest.BuildOptions {
+	var tailscaleBuildOptions *dockertest.BuildOptions
+	switch version {
+	case "head":
+		tailscaleBuildOptions = &dockertest.BuildOptions{
+			Dockerfile: "Dockerfile.tailscale-HEAD",
+			ContextDir: ".",
+			BuildArgs:  []docker.BuildArg{},
+		}
+	case "unstable":
+		tailscaleBuildOptions = &dockertest.BuildOptions{
+			Dockerfile: "Dockerfile.tailscale",
+			ContextDir: ".",
+			BuildArgs: []docker.BuildArg{
+				{
+					Name:  "TAILSCALE_VERSION",
+					Value: "*", // Installs the latest version https://askubuntu.com/a/824926
+				},
+				{
+					Name:  "TAILSCALE_CHANNEL",
+					Value: "unstable",
+				},
+			},
+		}
+	default:
+		tailscaleBuildOptions = &dockertest.BuildOptions{
+			Dockerfile: "Dockerfile.tailscale",
+			ContextDir: ".",
+			BuildArgs: []docker.BuildArg{
+				{
+					Name:  "TAILSCALE_VERSION",
+					Value: version,
+				},
+				{
+					Name:  "TAILSCALE_CHANNEL",
+					Value: "stable",
+				},
+			},
+		}
+	}
+	return tailscaleBuildOptions
+}
+
 func getIPs(
 	tailscales map[string]dockertest.Resource,
 ) (map[string][]netaddr.IP, error) {
@@ -158,4 +221,94 @@ func getIPs(
 	}
 
 	return ips, nil
+}
+
+func getDNSNames(
+	headscale *dockertest.Resource,
+) ([]string, error) {
+
+	listAllResult, err := ExecuteCommand(
+		headscale,
+		[]string{
+			"headscale",
+			"nodes",
+			"list",
+			"--output",
+			"json",
+		},
+		[]string{},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	var listAll []v1.Machine
+	err = json.Unmarshal([]byte(listAllResult), &listAll)
+	if err != nil {
+		return nil, err
+	}
+
+	hostnames := make([]string, len(listAll))
+
+	for index := range listAll {
+		hostnames[index] = listAll[index].GetGivenName()
+	}
+
+	return hostnames, nil
+}
+
+func getMagicFQDN(
+	headscale *dockertest.Resource,
+) ([]string, error) {
+
+	listAllResult, err := ExecuteCommand(
+		headscale,
+		[]string{
+			"headscale",
+			"nodes",
+			"list",
+			"--output",
+			"json",
+		},
+		[]string{},
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	var listAll []v1.Machine
+	err = json.Unmarshal([]byte(listAllResult), &listAll)
+	if err != nil {
+		return nil, err
+	}
+
+	hostnames := make([]string, len(listAll))
+
+	for index := range listAll {
+		hostnames[index] = fmt.Sprintf("%s.%s.headscale.net", listAll[index].GetGivenName(), listAll[index].GetNamespace().GetName())
+	}
+
+	return hostnames, nil
+}
+
+func GetEnvStr(key string) (string, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return v, errEnvVarEmpty
+	}
+
+	return v, nil
+}
+
+func GetEnvBool(key string) (bool, error) {
+	s, err := GetEnvStr(key)
+	if err != nil {
+		return false, err
+	}
+	v, err := strconv.ParseBool(s)
+	if err != nil {
+		return false, err
+	}
+
+	return v, nil
 }

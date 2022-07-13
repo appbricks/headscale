@@ -10,9 +10,10 @@ import (
 	"html/template"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
-	"github.com/gin-gonic/gin"
+	"github.com/gorilla/mux"
 	"github.com/rs/zerolog/log"
 	"golang.org/x/oauth2"
 	"tailscale.com/types/key"
@@ -52,7 +53,7 @@ func (h *Headscale) initOIDC() error {
 				"%s/oidc/callback",
 				strings.TrimSuffix(h.cfg.ServerURL, "/"),
 			),
-			Scopes: []string{oidc.ScopeOpenID, "profile", "email"},
+			Scopes: h.cfg.OIDC.Scope,
 		}
 	}
 
@@ -62,10 +63,17 @@ func (h *Headscale) initOIDC() error {
 // RegisterOIDC redirects to the OIDC provider for authentication
 // Puts machine key in cache so the callback can retrieve it using the oidc state param
 // Listens in /oidc/register/:mKey.
-func (h *Headscale) RegisterOIDC(ctx *gin.Context) {
-	machineKeyStr := ctx.Param("mkey")
-	if machineKeyStr == "" {
-		ctx.String(http.StatusBadRequest, "Wrong params")
+func (h *Headscale) RegisterOIDC(
+	writer http.ResponseWriter,
+	req *http.Request,
+) {
+	vars := mux.Vars(req)
+	machineKeyStr, ok := vars["mkey"]
+	if !ok || machineKeyStr == "" {
+		log.Error().
+			Caller().
+			Msg("Missing machine key in URL")
+		http.Error(writer, "Missing machine key in URL", http.StatusBadRequest)
 
 		return
 	}
@@ -80,7 +88,7 @@ func (h *Headscale) RegisterOIDC(ctx *gin.Context) {
 		log.Error().
 			Caller().
 			Msg("could not read 16 bytes from rand")
-		ctx.String(http.StatusInternalServerError, "could not read 16 bytes from rand")
+		http.Error(writer, "Internal server error", http.StatusInternalServerError)
 
 		return
 	}
@@ -90,10 +98,17 @@ func (h *Headscale) RegisterOIDC(ctx *gin.Context) {
 	// place the machine key into the state cache, so it can be retrieved later
 	h.registrationCache.Set(stateStr, machineKeyStr, registerCacheExpiration)
 
-	authURL := h.oauth2Config.AuthCodeURL(stateStr)
+	// Add any extra parameter provided in the configuration to the Authorize Endpoint request
+	extras := make([]oauth2.AuthCodeOption, 0, len(h.cfg.OIDC.ExtraParams))
+
+	for k, v := range h.cfg.OIDC.ExtraParams {
+		extras = append(extras, oauth2.SetAuthURLParam(k, v))
+	}
+
+	authURL := h.oauth2Config.AuthCodeURL(stateStr, extras...)
 	log.Debug().Msgf("Redirecting to %s for authentication", authURL)
 
-	ctx.Redirect(http.StatusFound, authURL)
+	http.Redirect(writer, req, authURL, http.StatusFound)
 }
 
 type oidcCallbackTemplateConfig struct {
@@ -117,19 +132,42 @@ var oidcCallbackTemplate = template.Must(
 // TODO: A confirmation page for new machines should be added to avoid phishing vulnerabilities
 // TODO: Add groups information from OIDC tokens into machine HostInfo
 // Listens in /oidc/callback.
-func (h *Headscale) OIDCCallback(ctx *gin.Context) {
-	code := ctx.Query("code")
-	state := ctx.Query("state")
+func (h *Headscale) OIDCCallback(
+	writer http.ResponseWriter,
+	req *http.Request,
+) {
+	code := req.URL.Query().Get("code")
+	state := req.URL.Query().Get("state")
 
 	if code == "" || state == "" {
-		ctx.String(http.StatusBadRequest, "Wrong params")
+		writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		writer.WriteHeader(http.StatusBadRequest)
+		_, err := writer.Write([]byte("Wrong params"))
+		if err != nil {
+			log.Error().
+				Caller().
+				Err(err).
+				Msg("Failed to write response")
+		}
 
 		return
 	}
 
 	oauth2Token, err := h.oauth2Config.Exchange(context.Background(), code)
 	if err != nil {
-		ctx.String(http.StatusBadRequest, "Could not exchange code for token")
+		log.Error().
+			Err(err).
+			Caller().
+			Msg("Could not exchange code for token")
+		writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		writer.WriteHeader(http.StatusBadRequest)
+		_, err := writer.Write([]byte("Could not exchange code for token"))
+		if err != nil {
+			log.Error().
+				Caller().
+				Err(err).
+				Msg("Failed to write response")
+		}
 
 		return
 	}
@@ -142,7 +180,15 @@ func (h *Headscale) OIDCCallback(ctx *gin.Context) {
 
 	rawIDToken, rawIDTokenOK := oauth2Token.Extra("id_token").(string)
 	if !rawIDTokenOK {
-		ctx.String(http.StatusBadRequest, "Could not extract ID Token")
+		writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		writer.WriteHeader(http.StatusBadRequest)
+		_, err := writer.Write([]byte("Could not extract ID Token"))
+		if err != nil {
+			log.Error().
+				Caller().
+				Err(err).
+				Msg("Failed to write response")
+		}
 
 		return
 	}
@@ -155,7 +201,15 @@ func (h *Headscale) OIDCCallback(ctx *gin.Context) {
 			Err(err).
 			Caller().
 			Msg("failed to verify id token")
-		ctx.String(http.StatusBadRequest, "Failed to verify id token")
+		writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		writer.WriteHeader(http.StatusBadRequest)
+		_, err := writer.Write([]byte("Failed to verify id token"))
+		if err != nil {
+			log.Error().
+				Caller().
+				Err(err).
+				Msg("Failed to write response")
+		}
 
 		return
 	}
@@ -174,10 +228,51 @@ func (h *Headscale) OIDCCallback(ctx *gin.Context) {
 			Err(err).
 			Caller().
 			Msg("Failed to decode id token claims")
-		ctx.String(
-			http.StatusBadRequest,
-			"Failed to decode id token claims",
-		)
+		writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		writer.WriteHeader(http.StatusBadRequest)
+		_, err := writer.Write([]byte("Failed to decode id token claims"))
+		if err != nil {
+			log.Error().
+				Caller().
+				Err(err).
+				Msg("Failed to write response")
+		}
+
+		return
+	}
+
+	// If AllowedDomains is provided, check that the authenticated principal ends with @<alloweddomain>.
+	if len(h.cfg.OIDC.AllowedDomains) > 0 {
+		if at := strings.LastIndex(claims.Email, "@"); at < 0 ||
+			!IsStringInSlice(h.cfg.OIDC.AllowedDomains, claims.Email[at+1:]) {
+			log.Error().Msg("authenticated principal does not match any allowed domain")
+			writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			writer.WriteHeader(http.StatusBadRequest)
+			_, err := writer.Write([]byte("unauthorized principal (domain mismatch)"))
+			if err != nil {
+				log.Error().
+					Caller().
+					Err(err).
+					Msg("Failed to write response")
+			}
+
+			return
+		}
+	}
+
+	// If AllowedUsers is provided, check that the authenticated princial is part of that list.
+	if len(h.cfg.OIDC.AllowedUsers) > 0 &&
+		!IsStringInSlice(h.cfg.OIDC.AllowedUsers, claims.Email) {
+		log.Error().Msg("authenticated principal does not match any allowed user")
+		writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		writer.WriteHeader(http.StatusBadRequest)
+		_, err := writer.Write([]byte("unauthorized principal (user mismatch)"))
+		if err != nil {
+			log.Error().
+				Caller().
+				Err(err).
+				Msg("Failed to write response")
+		}
 
 		return
 	}
@@ -188,7 +283,15 @@ func (h *Headscale) OIDCCallback(ctx *gin.Context) {
 	if !machineKeyFound {
 		log.Error().
 			Msg("requested machine state key expired before authorisation completed")
-		ctx.String(http.StatusBadRequest, "state has expired")
+		writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		writer.WriteHeader(http.StatusBadRequest)
+		_, err := writer.Write([]byte("state has expired"))
+		if err != nil {
+			log.Error().
+				Caller().
+				Err(err).
+				Msg("Failed to write response")
+		}
 
 		return
 	}
@@ -202,17 +305,30 @@ func (h *Headscale) OIDCCallback(ctx *gin.Context) {
 	if err != nil {
 		log.Error().
 			Msg("could not parse machine public key")
-		ctx.String(http.StatusBadRequest, "could not parse public key")
+		writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		writer.WriteHeader(http.StatusBadRequest)
+		_, err := writer.Write([]byte("could not parse public key"))
+		if err != nil {
+			log.Error().
+				Caller().
+				Err(err).
+				Msg("Failed to write response")
+		}
 
 		return
 	}
 
 	if !machineKeyOK {
 		log.Error().Msg("could not get machine key from cache")
-		ctx.String(
-			http.StatusInternalServerError,
-			"could not get machine key from cache",
-		)
+		writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		writer.WriteHeader(http.StatusInternalServerError)
+		_, err := writer.Write([]byte("could not get machine key from cache"))
+		if err != nil {
+			log.Error().
+				Caller().
+				Err(err).
+				Msg("Failed to write response")
+		}
 
 		return
 	}
@@ -226,10 +342,19 @@ func (h *Headscale) OIDCCallback(ctx *gin.Context) {
 	if machine != nil {
 		log.Trace().
 			Caller().
-			Str("machine", machine.Name).
+			Str("machine", machine.Hostname).
 			Msg("machine already registered, reauthenticating")
 
-		h.RefreshMachine(machine, *machine.Expiry)
+		err := h.RefreshMachine(machine, time.Time{})
+		if err != nil {
+			log.Error().
+				Caller().
+				Err(err).
+				Msg("Failed to refresh machine")
+			http.Error(writer, "Failed to refresh machine", http.StatusInternalServerError)
+
+			return
+		}
 
 		var content bytes.Buffer
 		if err := oidcCallbackTemplate.Execute(&content, oidcCallbackTemplateConfig{
@@ -241,14 +366,29 @@ func (h *Headscale) OIDCCallback(ctx *gin.Context) {
 				Str("type", "reauthenticate").
 				Err(err).
 				Msg("Could not render OIDC callback template")
-			ctx.Data(
-				http.StatusInternalServerError,
-				"text/html; charset=utf-8",
-				[]byte("Could not render OIDC callback template"),
-			)
+
+			writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			writer.WriteHeader(http.StatusInternalServerError)
+			_, err := writer.Write([]byte("Could not render OIDC callback template"))
+			if err != nil {
+				log.Error().
+					Caller().
+					Err(err).
+					Msg("Failed to write response")
+			}
+
+			return
 		}
 
-		ctx.Data(http.StatusOK, "text/html; charset=utf-8", content.Bytes())
+		writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+		writer.WriteHeader(http.StatusOK)
+		_, err = writer.Write(content.Bytes())
+		if err != nil {
+			log.Error().
+				Caller().
+				Err(err).
+				Msg("Failed to write response")
+		}
 
 		return
 	}
@@ -259,10 +399,15 @@ func (h *Headscale) OIDCCallback(ctx *gin.Context) {
 	)
 	if err != nil {
 		log.Error().Err(err).Caller().Msgf("couldn't normalize email")
-		ctx.String(
-			http.StatusInternalServerError,
-			"couldn't normalize email",
-		)
+		writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		writer.WriteHeader(http.StatusInternalServerError)
+		_, err := writer.Write([]byte("couldn't normalize email"))
+		if err != nil {
+			log.Error().
+				Caller().
+				Err(err).
+				Msg("Failed to write response")
+		}
 
 		return
 	}
@@ -279,10 +424,15 @@ func (h *Headscale) OIDCCallback(ctx *gin.Context) {
 				Err(err).
 				Caller().
 				Msgf("could not create new namespace '%s'", namespaceName)
-			ctx.String(
-				http.StatusInternalServerError,
-				"could not create new namespace",
-			)
+			writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			writer.WriteHeader(http.StatusInternalServerError)
+			_, err := writer.Write([]byte("could not create namespace"))
+			if err != nil {
+				log.Error().
+					Caller().
+					Err(err).
+					Msg("Failed to write response")
+			}
 
 			return
 		}
@@ -292,10 +442,15 @@ func (h *Headscale) OIDCCallback(ctx *gin.Context) {
 			Err(err).
 			Str("namespace", namespaceName).
 			Msg("could not find or create namespace")
-		ctx.String(
-			http.StatusInternalServerError,
-			"could not find or create namespace",
-		)
+		writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		writer.WriteHeader(http.StatusInternalServerError)
+		_, err := writer.Write([]byte("could not find or create namespace"))
+		if err != nil {
+			log.Error().
+				Caller().
+				Err(err).
+				Msg("Failed to write response")
+		}
 
 		return
 	}
@@ -312,10 +467,15 @@ func (h *Headscale) OIDCCallback(ctx *gin.Context) {
 			Caller().
 			Err(err).
 			Msg("could not register machine")
-		ctx.String(
-			http.StatusInternalServerError,
-			"could not register machine",
-		)
+		writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		writer.WriteHeader(http.StatusInternalServerError)
+		_, err := writer.Write([]byte("could not register machine"))
+		if err != nil {
+			log.Error().
+				Caller().
+				Err(err).
+				Msg("Failed to write response")
+		}
 
 		return
 	}
@@ -330,12 +490,27 @@ func (h *Headscale) OIDCCallback(ctx *gin.Context) {
 			Str("type", "authenticate").
 			Err(err).
 			Msg("Could not render OIDC callback template")
-		ctx.Data(
-			http.StatusInternalServerError,
-			"text/html; charset=utf-8",
-			[]byte("Could not render OIDC callback template"),
-		)
+
+		writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		writer.WriteHeader(http.StatusInternalServerError)
+		_, err := writer.Write([]byte("Could not render OIDC callback template"))
+		if err != nil {
+			log.Error().
+				Caller().
+				Err(err).
+				Msg("Failed to write response")
+		}
+
+		return
 	}
 
-	ctx.Data(http.StatusOK, "text/html; charset=utf-8", content.Bytes())
+	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+	writer.WriteHeader(http.StatusOK)
+	_, err = writer.Write(content.Bytes())
+	if err != nil {
+		log.Error().
+			Caller().
+			Err(err).
+			Msg("Failed to write response")
+	}
 }

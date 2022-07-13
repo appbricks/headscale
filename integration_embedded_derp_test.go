@@ -40,41 +40,50 @@ type IntegrationDERPTestSuite struct {
 	pool      dockertest.Pool
 	networks  map[int]dockertest.Network // so we keep the containers isolated
 	headscale dockertest.Resource
+	saveLogs  bool
 
 	tailscales    map[string]dockertest.Resource
 	joinWaitGroup sync.WaitGroup
 }
 
 func TestDERPIntegrationTestSuite(t *testing.T) {
+	saveLogs, err := GetEnvBool("HEADSCALE_INTEGRATION_SAVE_LOG")
+	if err != nil {
+		saveLogs = false
+	}
+
 	s := new(IntegrationDERPTestSuite)
 
 	s.tailscales = make(map[string]dockertest.Resource)
 	s.networks = make(map[int]dockertest.Network)
+	s.saveLogs = saveLogs
 
 	suite.Run(t, s)
 
 	// HandleStats, which allows us to check if we passed and save logs
 	// is called after TearDown, so we cannot tear down containers before
 	// we have potentially saved the logs.
-	for _, tailscale := range s.tailscales {
-		if err := s.pool.Purge(&tailscale); err != nil {
+	if s.saveLogs {
+		for _, tailscale := range s.tailscales {
+			if err := s.pool.Purge(&tailscale); err != nil {
+				log.Printf("Could not purge resource: %s\n", err)
+			}
+		}
+
+		if !s.stats.Passed() {
+			err := s.saveLog(&s.headscale, "test_output")
+			if err != nil {
+				log.Printf("Could not save log: %s\n", err)
+			}
+		}
+		if err := s.pool.Purge(&s.headscale); err != nil {
 			log.Printf("Could not purge resource: %s\n", err)
 		}
-	}
 
-	if !s.stats.Passed() {
-		err := s.saveLog(&s.headscale, "test_output")
-		if err != nil {
-			log.Printf("Could not save log: %s\n", err)
-		}
-	}
-	if err := s.pool.Purge(&s.headscale); err != nil {
-		log.Printf("Could not purge resource: %s\n", err)
-	}
-
-	for _, network := range s.networks {
-		if err := network.Close(); err != nil {
-			log.Printf("Could not close network: %s\n", err)
+		for _, network := range s.networks {
+			if err := network.Close(); err != nil {
+				log.Printf("Could not close network: %s\n", err)
+			}
 		}
 	}
 }
@@ -83,14 +92,14 @@ func (s *IntegrationDERPTestSuite) SetupSuite() {
 	if ppool, err := dockertest.NewPool(""); err == nil {
 		s.pool = *ppool
 	} else {
-		log.Fatalf("Could not connect to docker: %s", err)
+		s.FailNow(fmt.Sprintf("Could not connect to docker: %s", err), "")
 	}
 
 	for i := 0; i < totalContainers; i++ {
 		if pnetwork, err := s.pool.CreateNetwork(fmt.Sprintf("headscale-derp-%d", i)); err == nil {
 			s.networks[i] = *pnetwork
 		} else {
-			log.Fatalf("Could not create network: %s", err)
+			s.FailNow(fmt.Sprintf("Could not create network: %s", err), "")
 		}
 	}
 
@@ -101,13 +110,16 @@ func (s *IntegrationDERPTestSuite) SetupSuite() {
 
 	currentPath, err := os.Getwd()
 	if err != nil {
-		log.Fatalf("Could not determine current path: %s", err)
+		s.FailNow(fmt.Sprintf("Could not determine current path: %s", err), "")
 	}
 
 	headscaleOptions := &dockertest.RunOptions{
 		Name: headscaleHostname,
 		Mounts: []string{
-			fmt.Sprintf("%s/integration_test/etc_embedded_derp:/etc/headscale", currentPath),
+			fmt.Sprintf(
+				"%s/integration_test/etc_embedded_derp:/etc/headscale",
+				currentPath,
+			),
 		},
 		Cmd:          []string{"headscale", "serve"},
 		ExposedPorts: []string{"8443/tcp", "3478/udp"},
@@ -117,11 +129,16 @@ func (s *IntegrationDERPTestSuite) SetupSuite() {
 		},
 	}
 
+	err = s.pool.RemoveContainerByName(headscaleHostname)
+	if err != nil {
+		s.FailNow(fmt.Sprintf("Could not remove existing container before building test: %s", err), "")
+	}
+
 	log.Println("Creating headscale container")
 	if pheadscale, err := s.pool.BuildAndRunWithBuildOptions(headscaleBuildOptions, headscaleOptions, DockerRestartPolicy); err == nil {
 		s.headscale = *pheadscale
 	} else {
-		log.Fatalf("Could not start resource: %s", err)
+		s.FailNow(fmt.Sprintf("Could not start headscale container: %s", err), "")
 	}
 	log.Println("Created headscale container to test DERP")
 
@@ -197,7 +214,10 @@ func (s *IntegrationDERPTestSuite) SetupSuite() {
 	assert.Nil(s.T(), err)
 	assert.True(s.T(), preAuthKey.Reusable)
 
-	headscaleEndpoint := fmt.Sprintf("https://headscale:%s", s.headscale.GetPort("8443/tcp"))
+	headscaleEndpoint := fmt.Sprintf(
+		"https://headscale:%s",
+		s.headscale.GetPort("8443/tcp"),
+	)
 
 	log.Printf(
 		"Joining tailscale containers to headscale at %s\n",
@@ -243,18 +263,12 @@ func (s *IntegrationDERPTestSuite) Join(
 	log.Printf("%s joined\n", hostname)
 }
 
-func (s *IntegrationDERPTestSuite) tailscaleContainer(identifier, version string, network dockertest.Network,
+func (s *IntegrationDERPTestSuite) tailscaleContainer(
+	identifier, version string,
+	network dockertest.Network,
 ) (string, *dockertest.Resource) {
-	tailscaleBuildOptions := &dockertest.BuildOptions{
-		Dockerfile: "Dockerfile.tailscale",
-		ContextDir: ".",
-		BuildArgs: []docker.BuildArg{
-			{
-				Name:  "TAILSCALE_VERSION",
-				Value: version,
-			},
-		},
-	}
+	tailscaleBuildOptions := getDockerBuildOptions(version)
+
 	hostname := fmt.Sprintf(
 		"tailscale-%s-%s",
 		strings.Replace(version, ".", "-", -1),
@@ -268,7 +282,10 @@ func (s *IntegrationDERPTestSuite) tailscaleContainer(identifier, version string
 		},
 
 		// expose the host IP address, so we can access it from inside the container
-		ExtraHosts: []string{"host.docker.internal:host-gateway", "headscale:host-gateway"},
+		ExtraHosts: []string{
+			"host.docker.internal:host-gateway",
+			"headscale:host-gateway",
+		},
 	}
 
 	pts, err := s.pool.BuildAndRunWithBuildOptions(
@@ -279,7 +296,7 @@ func (s *IntegrationDERPTestSuite) tailscaleContainer(identifier, version string
 		DockerAllowNetworkAdministration,
 	)
 	if err != nil {
-		log.Fatalf("Could not start resource: %s", err)
+		log.Fatalf("Could not start tailscale container version %s: %s", version, err)
 	}
 	log.Printf("Created %s container\n", hostname)
 
@@ -287,6 +304,23 @@ func (s *IntegrationDERPTestSuite) tailscaleContainer(identifier, version string
 }
 
 func (s *IntegrationDERPTestSuite) TearDownSuite() {
+	if !s.saveLogs {
+		for _, tailscale := range s.tailscales {
+			if err := s.pool.Purge(&tailscale); err != nil {
+				log.Printf("Could not purge resource: %s\n", err)
+			}
+		}
+
+		if err := s.pool.Purge(&s.headscale); err != nil {
+			log.Printf("Could not purge resource: %s\n", err)
+		}
+
+		for _, network := range s.networks {
+			if err := network.Close(); err != nil {
+				log.Printf("Could not close network: %s\n", err)
+			}
+		}
+	}
 }
 
 func (s *IntegrationDERPTestSuite) HandleStats(
@@ -350,11 +384,14 @@ func (s *IntegrationDERPTestSuite) saveLog(
 }
 
 func (s *IntegrationDERPTestSuite) TestPingAllPeersByHostname() {
-	ips, err := getIPs(s.tailscales)
+	hostnames, err := getDNSNames(&s.headscale)
 	assert.Nil(s.T(), err)
+
+	log.Printf("Hostnames: %#v\n", hostnames)
+
 	for hostname, tailscale := range s.tailscales {
-		for peername := range ips {
-			if peername == hostname {
+		for _, peername := range hostnames {
+			if strings.Contains(peername, hostname) {
 				continue
 			}
 			s.T().Run(fmt.Sprintf("%s-%s", hostname, peername), func(t *testing.T) {

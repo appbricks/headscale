@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin"
+	"github.com/gorilla/mux"
 	"github.com/klauspost/compress/zstd"
 	"github.com/rs/zerolog/log"
 	"gorm.io/gorm"
@@ -32,12 +32,19 @@ const (
 
 // KeyHandler provides the Headscale pub key
 // Listens in /key.
-func (h *Headscale) KeyHandler(ctx *gin.Context) {
-	ctx.Data(
-		http.StatusOK,
-		"text/plain; charset=utf-8",
-		[]byte(MachinePublicKeyStripPrefix(h.privateKey.Public())),
-	)
+func (h *Headscale) KeyHandler(
+	writer http.ResponseWriter,
+	req *http.Request,
+) {
+	writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	writer.WriteHeader(http.StatusOK)
+	_, err := writer.Write([]byte(MachinePublicKeyStripPrefix(h.privateKey.Public())))
+	if err != nil {
+		log.Error().
+			Caller().
+			Err(err).
+			Msg("Failed to write response")
+	}
 }
 
 type registerWebAPITemplateConfig struct {
@@ -63,10 +70,21 @@ var registerWebAPITemplate = template.Must(
 
 // RegisterWebAPI shows a simple message in the browser to point to the CLI
 // Listens in /register.
-func (h *Headscale) RegisterWebAPI(ctx *gin.Context) {
-	machineKeyStr := ctx.Query("key")
+func (h *Headscale) RegisterWebAPI(
+	writer http.ResponseWriter,
+	req *http.Request,
+) {
+	machineKeyStr := req.URL.Query().Get("key")
 	if machineKeyStr == "" {
-		ctx.String(http.StatusBadRequest, "Wrong params")
+		writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		writer.WriteHeader(http.StatusBadRequest)
+		_, err := writer.Write([]byte("Wrong params"))
+		if err != nil {
+			log.Error().
+				Caller().
+				Err(err).
+				Msg("Failed to write response")
+		}
 
 		return
 	}
@@ -79,21 +97,48 @@ func (h *Headscale) RegisterWebAPI(ctx *gin.Context) {
 			Str("func", "RegisterWebAPI").
 			Err(err).
 			Msg("Could not render register web API template")
-		ctx.Data(
-			http.StatusInternalServerError,
-			"text/html; charset=utf-8",
-			[]byte("Could not render register web API template"),
-		)
+		writer.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		writer.WriteHeader(http.StatusInternalServerError)
+		_, err = writer.Write([]byte("Could not render register web API template"))
+		if err != nil {
+			log.Error().
+				Caller().
+				Err(err).
+				Msg("Failed to write response")
+		}
+
+		return
 	}
 
-	ctx.Data(http.StatusOK, "text/html; charset=utf-8", content.Bytes())
+	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+	writer.WriteHeader(http.StatusOK)
+	_, err := writer.Write(content.Bytes())
+	if err != nil {
+		log.Error().
+			Caller().
+			Err(err).
+			Msg("Failed to write response")
+	}
 }
 
 // RegistrationHandler handles the actual registration process of a machine
-// Endpoint /machine/:id.
-func (h *Headscale) RegistrationHandler(ctx *gin.Context) {
-	body, _ := io.ReadAll(ctx.Request.Body)
-	machineKeyStr := ctx.Param("id")
+// Endpoint /machine/:mkey.
+func (h *Headscale) RegistrationHandler(
+	writer http.ResponseWriter,
+	req *http.Request,
+) {
+	vars := mux.Vars(req)
+	machineKeyStr, ok := vars["mkey"]
+	if !ok || machineKeyStr == "" {
+		log.Error().
+			Str("handler", "RegistrationHandler").
+			Msg("No machine ID in request")
+		http.Error(writer, "No machine ID in request", http.StatusBadRequest)
+
+		return
+	}
+
+	body, _ := io.ReadAll(req.Body)
 
 	var machineKey key.MachinePublic
 	err := machineKey.UnmarshalText([]byte(MachinePublicKeyEnsurePrefix(machineKeyStr)))
@@ -103,19 +148,19 @@ func (h *Headscale) RegistrationHandler(ctx *gin.Context) {
 			Err(err).
 			Msg("Cannot parse machine key")
 		machineRegistrations.WithLabelValues("unknown", "web", "error", "unknown").Inc()
-		ctx.String(http.StatusInternalServerError, "Sad!")
+		http.Error(writer, "Cannot parse machine key", http.StatusBadRequest)
 
 		return
 	}
-	req := tailcfg.RegisterRequest{}
-	err = decode(body, &req, &machineKey, h.privateKey)
+	registerRequest := tailcfg.RegisterRequest{}
+	err = decode(body, &registerRequest, &machineKey, h.privateKey)
 	if err != nil {
 		log.Error().
 			Caller().
 			Err(err).
 			Msg("Cannot decode message")
 		machineRegistrations.WithLabelValues("unknown", "web", "error", "unknown").Inc()
-		ctx.String(http.StatusInternalServerError, "Very sad!")
+		http.Error(writer, "Cannot decode message", http.StatusBadRequest)
 
 		return
 	}
@@ -123,25 +168,23 @@ func (h *Headscale) RegistrationHandler(ctx *gin.Context) {
 	now := time.Now().UTC()
 	machine, err := h.GetMachineByMachineKey(machineKey)
 	if errors.Is(err, gorm.ErrRecordNotFound) {
-		log.Info().Str("machine", req.Hostinfo.Hostname).Msg("New machine")
+		log.Info().Str("machine", registerRequest.Hostinfo.Hostname).Msg("New machine")
 
 		machineKeyStr := MachinePublicKeyStripPrefix(machineKey)
 
 		// If the machine has AuthKey set, handle registration via PreAuthKeys
-		if req.Auth.AuthKey != "" {
-			h.handleAuthKey(ctx, machineKey, req)
+		if registerRequest.Auth.AuthKey != "" {
+			h.handleAuthKey(writer, req, machineKey, registerRequest)
 
 			return
 		}
-		hname, err := NormalizeToFQDNRules(
-			req.Hostinfo.Hostname,
-			h.cfg.OIDC.StripEmaildomain,
-		)
+
+		givenName, err := h.GenerateGivenName(registerRequest.Hostinfo.Hostname)
 		if err != nil {
 			log.Error().
 				Caller().
 				Str("func", "RegistrationHandler").
-				Str("hostinfo.name", req.Hostinfo.Hostname).
+				Str("hostinfo.name", registerRequest.Hostinfo.Hostname).
 				Err(err)
 
 			return
@@ -153,19 +196,20 @@ func (h *Headscale) RegistrationHandler(ctx *gin.Context) {
 		// happens
 		newMachine := Machine{
 			MachineKey: machineKeyStr,
-			Name:       hname,
-			NodeKey:    NodePublicKeyStripPrefix(req.NodeKey),
+			Hostname:   registerRequest.Hostinfo.Hostname,
+			GivenName:  givenName,
+			NodeKey:    NodePublicKeyStripPrefix(registerRequest.NodeKey),
 			LastSeen:   &now,
 			Expiry:     &time.Time{},
 		}
 
-		if !req.Expiry.IsZero() {
+		if !registerRequest.Expiry.IsZero() {
 			log.Trace().
 				Caller().
-				Str("machine", req.Hostinfo.Hostname).
-				Time("expiry", req.Expiry).
+				Str("machine", registerRequest.Hostinfo.Hostname).
+				Time("expiry", registerRequest.Expiry).
 				Msg("Non-zero expiry time requested")
-			newMachine.Expiry = &req.Expiry
+			newMachine.Expiry = &registerRequest.Expiry
 		}
 
 		h.registrationCache.Set(
@@ -174,7 +218,7 @@ func (h *Headscale) RegistrationHandler(ctx *gin.Context) {
 			registerCacheExpiration,
 		)
 
-		h.handleMachineRegistrationNew(ctx, machineKey, req)
+		h.handleMachineRegistrationNew(writer, req, machineKey, registerRequest)
 
 		return
 	}
@@ -186,11 +230,11 @@ func (h *Headscale) RegistrationHandler(ctx *gin.Context) {
 		// - Trying to log out (sending a expiry in the past)
 		// - A valid, registered machine, looking for the node map
 		// - Expired machine wanting to reauthenticate
-		if machine.NodeKey == NodePublicKeyStripPrefix(req.NodeKey) {
+		if machine.NodeKey == NodePublicKeyStripPrefix(registerRequest.NodeKey) {
 			// The client sends an Expiry in the past if the client is requesting to expire the key (aka logout)
 			//   https://github.com/tailscale/tailscale/blob/main/tailcfg/tailcfg.go#L648
-			if !req.Expiry.IsZero() && req.Expiry.UTC().Before(now) {
-				h.handleMachineLogOut(ctx, machineKey, *machine)
+			if !registerRequest.Expiry.IsZero() && registerRequest.Expiry.UTC().Before(now) {
+				h.handleMachineLogOut(writer, req, machineKey, *machine)
 
 				return
 			}
@@ -198,22 +242,22 @@ func (h *Headscale) RegistrationHandler(ctx *gin.Context) {
 			// If machine is not expired, and is register, we have a already accepted this machine,
 			// let it proceed with a valid registration
 			if !machine.isExpired() {
-				h.handleMachineValidRegistration(ctx, machineKey, *machine)
+				h.handleMachineValidRegistration(writer, req, machineKey, *machine)
 
 				return
 			}
 		}
 
 		// The NodeKey we have matches OldNodeKey, which means this is a refresh after a key expiration
-		if machine.NodeKey == NodePublicKeyStripPrefix(req.OldNodeKey) &&
+		if machine.NodeKey == NodePublicKeyStripPrefix(registerRequest.OldNodeKey) &&
 			!machine.isExpired() {
-			h.handleMachineRefreshKey(ctx, machineKey, req, *machine)
+			h.handleMachineRefreshKey(writer, req, machineKey, registerRequest, *machine)
 
 			return
 		}
 
 		// The machine has expired
-		h.handleMachineExpired(ctx, machineKey, req, *machine)
+		h.handleMachineExpired(writer, req, machineKey, registerRequest, *machine)
 
 		return
 	}
@@ -221,12 +265,12 @@ func (h *Headscale) RegistrationHandler(ctx *gin.Context) {
 
 func (h *Headscale) getMapResponse(
 	machineKey key.MachinePublic,
-	req tailcfg.MapRequest,
+	mapRequest tailcfg.MapRequest,
 	machine *Machine,
 ) ([]byte, error) {
 	log.Trace().
 		Str("func", "getMapResponse").
-		Str("machine", req.Hostinfo.Hostname).
+		Str("machine", mapRequest.Hostinfo.Hostname).
 		Msg("Creating Map response")
 	node, err := machine.toNode(h.cfg.BaseDomain, h.cfg.DNSConfig, true)
 	if err != nil {
@@ -279,16 +323,20 @@ func (h *Headscale) getMapResponse(
 		PacketFilter: h.aclRules,
 		DERPMap:      h.DERPMap,
 		UserProfiles: profiles,
+		Debug: &tailcfg.Debug{
+			DisableLogTail:      !h.cfg.LogTail.Enabled,
+			RandomizeClientPort: h.cfg.RandomizeClientPort,
+		},
 	}
 
 	log.Trace().
 		Str("func", "getMapResponse").
-		Str("machine", req.Hostinfo.Hostname).
+		Str("machine", mapRequest.Hostinfo.Hostname).
 		// Interface("payload", resp).
 		Msgf("Generated map response: %s", tailMapResponseToString(resp))
 
 	var respBody []byte
-	if req.Compress == "zstd" {
+	if mapRequest.Compress == "zstd" {
 		src, err := json.Marshal(resp)
 		if err != nil {
 			log.Error().
@@ -360,17 +408,28 @@ func (h *Headscale) getMapKeepAliveResponse(
 }
 
 func (h *Headscale) handleMachineLogOut(
-	ctx *gin.Context,
+	writer http.ResponseWriter,
+	req *http.Request,
 	machineKey key.MachinePublic,
 	machine Machine,
 ) {
 	resp := tailcfg.RegisterResponse{}
 
 	log.Info().
-		Str("machine", machine.Name).
+		Str("machine", machine.Hostname).
 		Msg("Client requested logout")
 
-	h.ExpireMachine(&machine)
+	err := h.ExpireMachine(&machine)
+	if err != nil {
+		log.Error().
+			Caller().
+			Str("func", "handleMachineLogOut").
+			Err(err).
+			Msg("Failed to expire machine")
+		http.Error(writer, "Internal server error", http.StatusInternalServerError)
+
+		return
+	}
 
 	resp.AuthURL = ""
 	resp.MachineAuthorized = false
@@ -381,15 +440,25 @@ func (h *Headscale) handleMachineLogOut(
 			Caller().
 			Err(err).
 			Msg("Cannot encode message")
-		ctx.String(http.StatusInternalServerError, "")
+		http.Error(writer, "Internal server error", http.StatusInternalServerError)
 
 		return
 	}
-	ctx.Data(http.StatusOK, "application/json; charset=utf-8", respBody)
+
+	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+	writer.WriteHeader(http.StatusOK)
+	_, err = writer.Write(respBody)
+	if err != nil {
+		log.Error().
+			Caller().
+			Err(err).
+			Msg("Failed to write response")
+	}
 }
 
 func (h *Headscale) handleMachineValidRegistration(
-	ctx *gin.Context,
+	writer http.ResponseWriter,
+	req *http.Request,
 	machineKey key.MachinePublic,
 	machine Machine,
 ) {
@@ -397,7 +466,7 @@ func (h *Headscale) handleMachineValidRegistration(
 
 	// The machine registration is valid, respond with redirect to /map
 	log.Debug().
-		Str("machine", machine.Name).
+		Str("machine", machine.Hostname).
 		Msg("Client is registered and we have the current NodeKey. All clear to /map")
 
 	resp.AuthURL = ""
@@ -413,17 +482,27 @@ func (h *Headscale) handleMachineValidRegistration(
 			Msg("Cannot encode message")
 		machineRegistrations.WithLabelValues("update", "web", "error", machine.Namespace.Name).
 			Inc()
-		ctx.String(http.StatusInternalServerError, "")
+		http.Error(writer, "Internal server error", http.StatusInternalServerError)
 
 		return
 	}
 	machineRegistrations.WithLabelValues("update", "web", "success", machine.Namespace.Name).
 		Inc()
-	ctx.Data(http.StatusOK, "application/json; charset=utf-8", respBody)
+
+	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+	writer.WriteHeader(http.StatusOK)
+	_, err = writer.Write(respBody)
+	if err != nil {
+		log.Error().
+			Caller().
+			Err(err).
+			Msg("Failed to write response")
+	}
 }
 
 func (h *Headscale) handleMachineExpired(
-	ctx *gin.Context,
+	writer http.ResponseWriter,
+	req *http.Request,
 	machineKey key.MachinePublic,
 	registerRequest tailcfg.RegisterRequest,
 	machine Machine,
@@ -432,11 +511,11 @@ func (h *Headscale) handleMachineExpired(
 
 	// The client has registered before, but has expired
 	log.Debug().
-		Str("machine", machine.Name).
+		Str("machine", machine.Hostname).
 		Msg("Machine registration has expired. Sending a authurl to register")
 
 	if registerRequest.Auth.AuthKey != "" {
-		h.handleAuthKey(ctx, machineKey, registerRequest)
+		h.handleAuthKey(writer, req, machineKey, registerRequest)
 
 		return
 	}
@@ -457,17 +536,27 @@ func (h *Headscale) handleMachineExpired(
 			Msg("Cannot encode message")
 		machineRegistrations.WithLabelValues("reauth", "web", "error", machine.Namespace.Name).
 			Inc()
-		ctx.String(http.StatusInternalServerError, "")
+		http.Error(writer, "Internal server error", http.StatusInternalServerError)
 
 		return
 	}
 	machineRegistrations.WithLabelValues("reauth", "web", "success", machine.Namespace.Name).
 		Inc()
-	ctx.Data(http.StatusOK, "application/json; charset=utf-8", respBody)
+
+	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+	writer.WriteHeader(http.StatusOK)
+	_, err = writer.Write(respBody)
+	if err != nil {
+		log.Error().
+			Caller().
+			Err(err).
+			Msg("Failed to write response")
+	}
 }
 
 func (h *Headscale) handleMachineRefreshKey(
-	ctx *gin.Context,
+	writer http.ResponseWriter,
+	req *http.Request,
 	machineKey key.MachinePublic,
 	registerRequest tailcfg.RegisterRequest,
 	machine Machine,
@@ -475,10 +564,19 @@ func (h *Headscale) handleMachineRefreshKey(
 	resp := tailcfg.RegisterResponse{}
 
 	log.Debug().
-		Str("machine", machine.Name).
+		Str("machine", machine.Hostname).
 		Msg("We have the OldNodeKey in the database. This is a key refresh")
 	machine.NodeKey = NodePublicKeyStripPrefix(registerRequest.NodeKey)
-	h.db.Save(&machine)
+
+	if err := h.db.Save(&machine).Error; err != nil {
+		log.Error().
+			Caller().
+			Err(err).
+			Msg("Failed to update machine key in the database")
+		http.Error(writer, "Internal server error", http.StatusInternalServerError)
+
+		return
+	}
 
 	resp.AuthURL = ""
 	resp.User = *machine.Namespace.toUser()
@@ -488,15 +586,25 @@ func (h *Headscale) handleMachineRefreshKey(
 			Caller().
 			Err(err).
 			Msg("Cannot encode message")
-		ctx.String(http.StatusInternalServerError, "Extremely sad!")
+		http.Error(writer, "Internal server error", http.StatusInternalServerError)
 
 		return
 	}
-	ctx.Data(http.StatusOK, "application/json; charset=utf-8", respBody)
+
+	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+	writer.WriteHeader(http.StatusOK)
+	_, err = writer.Write(respBody)
+	if err != nil {
+		log.Error().
+			Caller().
+			Err(err).
+			Msg("Failed to write response")
+	}
 }
 
 func (h *Headscale) handleMachineRegistrationNew(
-	ctx *gin.Context,
+	writer http.ResponseWriter,
+	req *http.Request,
 	machineKey key.MachinePublic,
 	registerRequest tailcfg.RegisterRequest,
 ) {
@@ -523,16 +631,26 @@ func (h *Headscale) handleMachineRegistrationNew(
 			Caller().
 			Err(err).
 			Msg("Cannot encode message")
-		ctx.String(http.StatusInternalServerError, "")
+		http.Error(writer, "Internal server error", http.StatusInternalServerError)
 
 		return
 	}
-	ctx.Data(http.StatusOK, "application/json; charset=utf-8", respBody)
+
+	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+	writer.WriteHeader(http.StatusOK)
+	_, err = writer.Write(respBody)
+	if err != nil {
+		log.Error().
+			Caller().
+			Err(err).
+			Msg("Failed to write response")
+	}
 }
 
 // TODO: check if any locks are needed around IP allocation.
 func (h *Headscale) handleAuthKey(
-	ctx *gin.Context,
+	writer http.ResponseWriter,
+	req *http.Request,
 	machineKey key.MachinePublic,
 	registerRequest tailcfg.RegisterRequest,
 ) {
@@ -561,14 +679,23 @@ func (h *Headscale) handleAuthKey(
 				Str("machine", registerRequest.Hostinfo.Hostname).
 				Err(err).
 				Msg("Cannot encode message")
-			ctx.String(http.StatusInternalServerError, "")
+			http.Error(writer, "Internal server error", http.StatusInternalServerError)
 			machineRegistrations.WithLabelValues("new", RegisterMethodAuthKey, "error", pak.Namespace.Name).
 				Inc()
 
 			return
 		}
 
-		ctx.Data(http.StatusUnauthorized, "application/json; charset=utf-8", respBody)
+		writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+		writer.WriteHeader(http.StatusUnauthorized)
+		_, err = writer.Write(respBody)
+		if err != nil {
+			log.Error().
+				Caller().
+				Err(err).
+				Msg("Failed to write response")
+		}
+
 		log.Error().
 			Caller().
 			Str("func", "handleAuthKey").
@@ -579,7 +706,7 @@ func (h *Headscale) handleAuthKey(
 			machineRegistrations.WithLabelValues("new", RegisterMethodAuthKey, "error", pak.Namespace.Name).
 				Inc()
 		} else {
-			machineRegistrations.WithLabelValues("new", RegisterMethodAuthKey, "error").Inc()
+			machineRegistrations.WithLabelValues("new", RegisterMethodAuthKey, "error", "unknown").Inc()
 		}
 
 		return
@@ -600,16 +727,38 @@ func (h *Headscale) handleAuthKey(
 	if machine != nil {
 		log.Trace().
 			Caller().
-			Str("machine", machine.Name).
+			Str("machine", machine.Hostname).
 			Msg("machine already registered, refreshing with new auth key")
 
 		machine.NodeKey = nodeKey
 		machine.AuthKeyID = uint(pak.ID)
-		h.RefreshMachine(machine, registerRequest.Expiry)
+		err := h.RefreshMachine(machine, registerRequest.Expiry)
+		if err != nil {
+			log.Error().
+				Caller().
+				Str("machine", machine.Hostname).
+				Err(err).
+				Msg("Failed to refresh machine")
+
+			return
+		}
 	} else {
 		now := time.Now().UTC()
+
+		givenName, err := h.GenerateGivenName(registerRequest.Hostinfo.Hostname)
+		if err != nil {
+			log.Error().
+				Caller().
+				Str("func", "RegistrationHandler").
+				Str("hostinfo.name", registerRequest.Hostinfo.Hostname).
+				Err(err)
+
+			return
+		}
+
 		machineToRegister := Machine{
-			Name:           registerRequest.Hostinfo.Hostname,
+			Hostname:       registerRequest.Hostinfo.Hostname,
+			GivenName:      givenName,
 			NamespaceID:    pak.Namespace.ID,
 			MachineKey:     machineKeyStr,
 			RegisterMethod: RegisterMethodAuthKey,
@@ -629,16 +778,24 @@ func (h *Headscale) handleAuthKey(
 				Msg("could not register machine")
 			machineRegistrations.WithLabelValues("new", RegisterMethodAuthKey, "error", pak.Namespace.Name).
 				Inc()
-			ctx.String(
-				http.StatusInternalServerError,
-				"could not register machine",
-			)
+			http.Error(writer, "Internal server error", http.StatusInternalServerError)
 
 			return
 		}
 	}
 
-	h.UsePreAuthKey(pak)
+	err = h.UsePreAuthKey(pak)
+	if err != nil {
+		log.Error().
+			Caller().
+			Err(err).
+			Msg("Failed to use pre-auth key")
+		machineRegistrations.WithLabelValues("new", RegisterMethodAuthKey, "error", pak.Namespace.Name).
+			Inc()
+		http.Error(writer, "Internal server error", http.StatusInternalServerError)
+
+		return
+	}
 
 	resp.MachineAuthorized = true
 	resp.User = *pak.Namespace.toUser()
@@ -652,13 +809,22 @@ func (h *Headscale) handleAuthKey(
 			Msg("Cannot encode message")
 		machineRegistrations.WithLabelValues("new", RegisterMethodAuthKey, "error", pak.Namespace.Name).
 			Inc()
-		ctx.String(http.StatusInternalServerError, "Extremely sad!")
+		http.Error(writer, "Internal server error", http.StatusInternalServerError)
 
 		return
 	}
 	machineRegistrations.WithLabelValues("new", RegisterMethodAuthKey, "success", pak.Namespace.Name).
 		Inc()
-	ctx.Data(http.StatusOK, "application/json; charset=utf-8", respBody)
+	writer.Header().Set("Content-Type", "application/json; charset=utf-8")
+	writer.WriteHeader(http.StatusOK)
+	_, err = writer.Write(respBody)
+	if err != nil {
+		log.Error().
+			Caller().
+			Err(err).
+			Msg("Failed to write response")
+	}
+
 	log.Info().
 		Str("func", "handleAuthKey").
 		Str("machine", registerRequest.Hostinfo.Hostname).
