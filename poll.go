@@ -130,13 +130,13 @@ func (h *Headscale) PollNetMapHandler(
 		machine.LastSeen = &now
 
 		// **** MyCS integration ****
-		if req.EndpointTypes != nil {
-			b, err := json.Marshal(&req.EndpointTypes)
+		if mapRequest.EndpointTypes != nil {
+			b, err := json.Marshal(&mapRequest.EndpointTypes)
 			if err != nil {
 				log.Error().
 					Caller().
 					Str("func", "handleAuthKey").
-					Str("machine", machine.Name).
+					Str("machine", machine.GivenName).
 					Err(err).
 					Msg("Failed to marshal endpoint types")
 			}
