@@ -189,7 +189,7 @@ func (h *Headscale) getAvailableIP(ipPrefix netaddr.IPPrefix) (*netaddr.IP, erro
 	ipPrefixNetworkAddress, ipPrefixBroadcastAddress := GetIPPrefixEndpoints(ipPrefix)
 
 	// Get the first IP in our prefix
-	ip := ipPrefixNetworkAddress // ipPrefixNetworkAddress.Next() ** MyCS: commented as we don't want to skip first ip in range
+	ip := ipPrefixNetworkAddress.Next()
 
 	for {
 		if !ipPrefix.Contains(ip) {
