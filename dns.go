@@ -184,5 +184,11 @@ func getMapResponseDNSConfig(
 		dnsConfig = dnsConfigOrig
 	}
 
+	// *** MyCS integration ***
+	if MapTailscaleDNSConfig != nil {
+		MapTailscaleDNSConfig(dnsConfig)
+	}
+	// ************************
+
 	return dnsConfig
 }

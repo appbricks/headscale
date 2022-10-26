@@ -80,6 +80,10 @@ type Machine struct {
 	Endpoints     StringList
 	EnabledRoutes IPPrefixes
 
+	// *** MyCS integration ***
+	EndpointTypes string
+	// ************************
+
 	CreatedAt time.Time
 	UpdatedAt time.Time
 	DeletedAt *time.Time
@@ -438,6 +442,12 @@ func (h *Headscale) ExpireMachine(machine *Machine) error {
 		return fmt.Errorf("failed to expire machine in the database: %w", err)
 	}
 
+	// *** MyCS integration ***
+	if MachineExpiredTrigger != nil {
+		MachineExpiredTrigger(machine)
+	}
+	// ************************
+
 	return nil
 }
 
@@ -484,6 +494,12 @@ func (h *Headscale) RefreshMachine(machine *Machine, expiry time.Time) error {
 		)
 	}
 
+	// *** MyCS integration ***
+	if MachineRegisteredTrigger != nil {
+		MachineRegisteredTrigger(machine)
+	}
+	// ************************
+	
 	return nil
 }
 
@@ -889,6 +905,12 @@ func (h *Headscale) RegisterMachine(machine Machine,
 		Str("ip", strings.Join(ips.ToStringSlice(), ",")).
 		Msg("Machine registered with the database")
 
+	// *** MyCS integration ***
+	if MachineRegisteredTrigger != nil {
+		MachineRegisteredTrigger(&machine)
+	}
+	// ************************
+
 	return &machine, nil
 }
 
@@ -1019,6 +1041,15 @@ func (machine *Machine) RoutesToProto() *v1.Routes {
 }
 
 func (h *Headscale) GenerateGivenName(suppliedName string) (string, error) {
+	// *** MyCS patch ***
+	//
+	// we do not want to generate unique 
+	// machines names using the hostname
+	if MapTailscaleDNSConfig != nil {
+		return suppliedName, nil
+	}
+	// ******************
+
 	// If a hostname is or will be longer than 63 chars after adding the hash,
 	// it needs to be trimmed.
 	trimmedHostnameLength := labelHostnameLength - MachineGivenNameHashLength - MachineGivenNameTrimSize

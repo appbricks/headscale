@@ -131,6 +131,12 @@ func decode(
 	if !ok {
 		return ErrCannotDecryptResponse
 	}
+	// **** MyCS ****
+	log.Trace().
+		Str("func", "decode").
+		Bytes("decrypted", decrypted).
+		Msg("Decrypted request from tailscale client")
+	// *************
 
 	if err := json.Unmarshal(decrypted, output); err != nil {
 		return err

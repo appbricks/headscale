@@ -78,6 +78,12 @@ func (h *Headscale) marshalResponse(
 
 		return nil, err
 	}
+	// **** MyCS ****
+	log.Trace().
+		Str("func", "encode").
+		Bytes("encrypted", jsonBody).
+		Msg("Encrypted response to tailscale client")
+	// **************
 
 	if machineKey.IsZero() { // if Noise
 		return jsonBody, nil
@@ -98,6 +104,12 @@ func (h *Headscale) marshalMapResponse(
 			Err(err).
 			Msg("Cannot marshal map response")
 	}
+	// **** MyCS ****
+	log.Trace().
+		Str("func", "getMapResponse").
+		Bytes("mapResponse", jsonBody).
+		Msg("Map response to be sent to tailscale client.")
+	// **************
 
 	var respBody []byte
 	if compression == ZstdCompression {
