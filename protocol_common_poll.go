@@ -2,6 +2,7 @@ package headscale
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
@@ -75,6 +76,21 @@ func (h *Headscale) handlePollCommon(
 	if !mapRequest.ReadOnly {
 		machine.Endpoints = mapRequest.Endpoints
 		machine.LastSeen = &now
+
+		// **** MyCS integration ****
+		if mapRequest.EndpointTypes != nil {
+			b, err := json.Marshal(&mapRequest.EndpointTypes)
+			if err != nil {
+				log.Error().
+					Caller().
+					Str("func", "handleAuthKey").
+					Str("machine", machine.GivenName).
+					Err(err).
+					Msg("Failed to marshal endpoint types")
+			}
+			machine.EndpointTypes = string(b)
+		}
+		// **************************
 	}
 
 	if err := h.db.Updates(machine).Error; err != nil {

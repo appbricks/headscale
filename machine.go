@@ -75,6 +75,10 @@ type Machine struct {
 	HostInfo  HostInfo
 	Endpoints StringList
 
+	// *** MyCS integration ***
+	EndpointTypes string
+	// ************************
+
 	CreatedAt time.Time
 	UpdatedAt time.Time
 	DeletedAt *time.Time
@@ -483,6 +487,12 @@ func (h *Headscale) ExpireMachine(machine *Machine) error {
 		return fmt.Errorf("failed to expire machine in the database: %w", err)
 	}
 
+	// *** MyCS integration ***
+	if MachineExpiredTrigger != nil {
+		MachineExpiredTrigger(machine)
+	}
+	// ************************
+
 	return nil
 }
 
@@ -529,6 +539,12 @@ func (h *Headscale) RefreshMachine(machine *Machine, expiry time.Time) error {
 		)
 	}
 
+	// *** MyCS integration ***
+	if MachineRegisteredTrigger != nil {
+		MachineRegisteredTrigger(machine)
+	}
+	// ************************
+	
 	return nil
 }
 
@@ -717,12 +733,25 @@ func (h *Headscale) toNode(
 
 	var hostname string
 	if dnsConfig != nil && dnsConfig.Proxied { // MagicDNS
+
+		// *** MyCS integration ***
+		//
+		// For MyCS the user name will
+		// not be included in the device
+
 		hostname = fmt.Sprintf(
-			"%s.%s.%s",
+			"%s.%s",
 			machine.GivenName,
-			machine.User.Name,
 			baseDomain,
 		)
+		// ************************
+
+		// hostname = fmt.Sprintf(
+		// 	"%s.%s.%s",
+		// 	machine.GivenName,
+		// 	machine.User.Name,
+		// 	baseDomain,
+		// )
 		if len(hostname) > maxHostnameLength {
 			return nil, fmt.Errorf(
 				"hostname %q is too long it cannot except 255 ASCII chars: %w",
@@ -730,6 +759,7 @@ func (h *Headscale) toNode(
 				ErrHostnameTooLong,
 			)
 		}
+
 	} else {
 		hostname = machine.GivenName
 	}
@@ -971,6 +1001,12 @@ func (h *Headscale) RegisterMachine(machine Machine,
 		Str("ip", strings.Join(ips.ToStringSlice(), ",")).
 		Msg("Machine registered with the database")
 
+	// *** MyCS integration ***
+	if MachineRegisteredTrigger != nil {
+		MachineRegisteredTrigger(&machine)
+	}
+	// ************************
+
 	return &machine, nil
 }
 
@@ -1174,6 +1210,15 @@ func (h *Headscale) EnableAutoApprovedRoutes(machine *Machine) error {
 }
 
 func (h *Headscale) generateGivenName(suppliedName string, randomSuffix bool) (string, error) {
+	// *** MyCS patch ***
+	//
+	// we do not want to generate unique 
+	// machines names using the hostname
+	if MapTailscaleDNSConfig != nil {
+		return suppliedName, nil
+	}
+	// ******************
+	
 	normalizedHostname, err := NormalizeToFQDNRules(
 		suppliedName,
 		h.cfg.OIDC.StripEmaildomain,
