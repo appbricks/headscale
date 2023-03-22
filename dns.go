@@ -214,6 +214,12 @@ func getMapResponseDNSConfig(
 	}
 
 	addNextDNSMetadata(dnsConfig.Resolvers, machine)
+	
+	// *** MyCS integration ***
+	if MapTailscaleDNSConfig != nil {
+		MapTailscaleDNSConfig(dnsConfig)
+	}
+	// ************************
 
 	return dnsConfig
 }
