@@ -372,3 +372,9 @@ func (h *Headscale) failoverSubnetRoutesNodesPatch(milliSeconds int64) *time.Tic
 
 	return ticker
 }
+
+func (h *Headscale) UpdateACLPolicy(aclPolicy *ACLPolicy) error {
+	h.aclPolicy = aclPolicy
+	
+	return h.UpdateACLRules()
+}
