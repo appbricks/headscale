@@ -62,11 +62,11 @@ func (h *Headscale) Start() error {
 		go h.scheduledDERPMapUpdateWorker(derpMapCancelChannel)
 	}
 
-	// MyCS: patched to retrieve ticker of expire 
-	//       job so it can be cleanly shutdown
-	expireEphemeralNodesTicker := h.expireEphemeralNodesPatch(updateInterval)
-	expireExpiredMachinesTicker := h.expireExpiredMachinesNodesPatch(updateInterval)
-	failoverSubnetRoutesTicker := h.failoverSubnetRoutesNodesPatch(updateInterval)
+	// MyCS: patched clean up thread for
+	// * Headscale.expireEphemeralNodes()
+	// * Headscale.expireExpiredMachines()
+	// * Headscale.failoverSubnetRoutes()
+	cleanupExpiredNodeData := h.cleanupExpiredNodeData(updateInterval)
 
 	if zl.GlobalLevel() == zl.TraceLevel {
 		zerolog.RespLog = true
@@ -255,14 +255,8 @@ func (h *Headscale) Start() error {
 		log.Info().
 			Msg("Headscale Shutting down gracefully")
 
-		if expireEphemeralNodesTicker != nil {
-			expireEphemeralNodesTicker.Stop()
-		}
-		if expireExpiredMachinesTicker != nil {
-			expireExpiredMachinesTicker.Stop()
-		}
-		if failoverSubnetRoutesTicker != nil {
-			failoverSubnetRoutesTicker.Stop()
+		if cleanupExpiredNodeData != nil {
+			cleanupExpiredNodeData.Stop()
 		}
 
 		close(h.shutdownChan)
@@ -324,57 +318,33 @@ func (h *Headscale) Stop() error {
 	return nil
 }
 
-// Note: this a copy of Headscale.expireEphemeralNodes that
-// returns the ticker instance that can be cleanly shutdown
-//
-// expireEphemeralNodes deletes ephemeral machine records that have not been
-// seen for longer than h.cfg.EphemeralNodeInactivityTimeout.
-func (h *Headscale) expireEphemeralNodesPatch(milliSeconds int64) *time.Ticker {
+// Note: this combines the following clean-up funcs.
+// * Headscale.expireEphemeralNodes().
+// * Headscale.expireExpiredMachines().
+// * Headscale.failoverSubnetRoutes().
+func (h *Headscale) cleanupExpiredNodeData(milliSeconds int64) *time.Ticker {
 	ticker := time.NewTicker(time.Duration(milliSeconds) * time.Millisecond)
+	
 	go func() {
+		var err error
 		for range ticker.C {
 			h.expireEphemeralNodesWorker()
-		}
-	}()
-
-	return ticker
-}
-
-// Note: this a copy of Headscale.expireExpiredMachines that
-// returns the ticker instance that can be cleanly shutdown
-//
-// expireExpiredMachines expires machines that have an explicit expiry set
-// after that expiry time has passed.
-func (h *Headscale) expireExpiredMachinesNodesPatch(milliSeconds int64) *time.Ticker {
-	ticker := time.NewTicker(time.Duration(milliSeconds) * time.Millisecond)
-	go func() {
-		for range ticker.C {
-			h.expireExpiredMachinesWorker()
-		}
-	}()
-
-	return ticker
-}
-
-// Note: this a copy of Headscale.failoverSubnetRoutes that
-// returns the ticker instance that can be cleanly shutdown
-//
-func (h *Headscale) failoverSubnetRoutesNodesPatch(milliSeconds int64) *time.Ticker {
-	ticker := time.NewTicker(time.Duration(milliSeconds) * time.Millisecond)
-	go func() {
-		for range ticker.C {
-			err := h.handlePrimarySubnetFailover()
-			if err != nil {
+			h.expireExpiredMachinesWorker()			
+			if err = h.handlePrimarySubnetFailover(); err != nil {
 				log.Error().Err(err).Msg("failed to handle primary subnet failover")
-			}
+			}	
 		}
 	}()
 
 	return ticker
 }
 
-func (h *Headscale) UpdateACLPolicy(aclPolicy *ACLPolicy) error {
+func (h *Headscale) SetACLPolicy(aclPolicy *ACLPolicy) error {	
 	h.aclPolicy = aclPolicy
-	
+
 	return h.UpdateACLRules()
+}
+
+func (h *Headscale) GetACLFilterRules() []tailcfg.FilterRule {	
+	return h.aclRules
 }
