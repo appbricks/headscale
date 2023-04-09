@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	grpcMiddleware "github.com/grpc-ecosystem/go-grpc-middleware"
@@ -32,6 +33,8 @@ var (
 	MapTailscaleDNSConfig func(dnsConfig *tailcfg.DNSConfig)
 
 	stopFn func() error
+
+	ruleRefreshMx sync.Mutex
 )
 
 func (h *Headscale) DB() *gorm.DB {
@@ -341,6 +344,13 @@ func (h *Headscale) cleanupExpiredNodeData(milliSeconds int64) *time.Ticker {
 
 func (h *Headscale) SetACLPolicy(aclPolicy *ACLPolicy) error {	
 	h.aclPolicy = aclPolicy
+	
+	return h.RefreshACLRules()
+}
+
+func (h *Headscale) RefreshACLRules() error {
+	ruleRefreshMx.Lock()
+	defer ruleRefreshMx.Unlock()
 
 	return h.UpdateACLRules()
 }
@@ -348,3 +358,4 @@ func (h *Headscale) SetACLPolicy(aclPolicy *ACLPolicy) error {
 func (h *Headscale) GetACLFilterRules() []tailcfg.FilterRule {	
 	return h.aclRules
 }
+
