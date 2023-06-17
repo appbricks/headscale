@@ -352,10 +352,13 @@ func (h *Headscale) RefreshACLRules() error {
 	ruleRefreshMx.Lock()
 	defer ruleRefreshMx.Unlock()
 
-	return h.UpdateACLRules()
+	if h.aclPolicy != nil {
+		return h.UpdateACLRules()
+	} else {
+		return nil
+	}	
 }
 
 func (h *Headscale) GetACLFilterRules() []tailcfg.FilterRule {	
 	return h.aclRules
 }
-
